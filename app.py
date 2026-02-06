@@ -484,10 +484,12 @@ class ChatListView(ctk.CTkFrame):
         # Words per file slider
         self.words_bar = ctk.CTkFrame(self, fg_color="transparent")
         self.words_bar.pack(fill="x", padx=20, pady=(0, 12))
-        self.words_label = ctk.CTkLabel(self.words_bar, text="Разбивка (слов)", text_color=COLORS["text_sec"])
-        self.words_label.grid(row=0, column=0, sticky="w")
-        self.words_value = ctk.CTkLabel(self.words_bar, text="50 000", text_color=COLORS["text_sec"])
-        self.words_value.grid(row=0, column=2, sticky="e")
+        self.words_row = ctk.CTkFrame(self.words_bar, fg_color="transparent")
+        self.words_row.pack(anchor="w")
+        self.words_label = ctk.CTkLabel(self.words_row, text="Разбивка (слов)", text_color=COLORS["text_sec"])
+        self.words_label.pack(side="left")
+        self.words_value = ctk.CTkLabel(self.words_row, text="50 000", text_color=COLORS["text_sec"])
+        self.words_value.pack(side="left", padx=(10, 0))
         self.words_slider = ctk.CTkSlider(
             self.words_bar,
             from_=50,
@@ -498,8 +500,7 @@ class ChatListView(ctk.CTkFrame):
             width=320,
         )
         self.words_slider.set(50)
-        self.words_slider.grid(row=0, column=1, padx=(12, 12))
-        self.words_bar.grid_columnconfigure(1, weight=1)
+        self.words_slider.pack(anchor="w", pady=(6, 0))
 
         # Popular messages toggle
         self.popular_bar = ctk.CTkFrame(self, fg_color="transparent")
