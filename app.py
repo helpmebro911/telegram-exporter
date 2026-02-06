@@ -265,8 +265,10 @@ def build_poll(message) -> dict | None:
 def message_to_export(message) -> dict:
     msg_type = "service" if message.action else "message"
     sender = None
+    username = None
     if message.sender:
         sender = get_display_name(message.sender)
+        username = getattr(message.sender, "username", None)
     
     raw_text = getattr(message, "raw_text", None)
     msg_text = raw_text if raw_text is not None else message.message
@@ -276,6 +278,7 @@ def message_to_export(message) -> dict:
         "type": msg_type,
         "date": message.date.isoformat(),
         "from": sender,
+        "from_username": username,
         "from_id": message.sender_id,
         "text": normalize_text(msg_text),
     }
@@ -1179,8 +1182,9 @@ class App(ctk.CTk):
             has_topics = False
             is_forum = bool(getattr(getattr(dialog, "entity", None), "forum", False))
             analytics_enabled = self.analytics_enabled and self._is_group_chat(dialog)
-            author_counts: dict[str, int] = {}
-            author_messages: dict[str, list[str]] = {}
+            author_counts: dict[int, int] = {}
+            author_messages: dict[int, list[str]] = {}
+            author_meta: dict[int, dict[str, str]] = {}
             activity_counts: dict[str, int] = {}
 
             def _date_key(value: str | None) -> str | None:
@@ -1269,15 +1273,26 @@ class App(ctk.CTk):
                     rendered = f"{topic_comment}{formatted}" if topic_comment else formatted
 
                     if analytics_enabled:
-                        author = (msg_data.get("from") or "Без имени").strip()
-                        if not author:
-                            author = "Без имени"
-                        author_counts[author] = author_counts.get(author, 0) + 1
-                        entry = rendered
-                        msg_id = msg_data.get("id")
-                        if msg_id is not None:
-                            entry = f"ID: {msg_id}\n{rendered}".strip()
-                        author_messages.setdefault(author, []).append(entry)
+                        author_id = msg_data.get("from_id")
+                        if not isinstance(author_id, int) or author_id <= 0:
+                            author_id = None
+                        else:
+                            author = (msg_data.get("from") or "Без имени").strip()
+                            if not author:
+                                author = "Без имени"
+                            username = (msg_data.get("from_username") or "").strip()
+                            meta = author_meta.get(author_id) or {"name": author, "username": username}
+                            if not meta.get("name") and author:
+                                meta["name"] = author
+                            if not meta.get("username") and username:
+                                meta["username"] = username
+                            author_meta[author_id] = meta
+                            author_counts[author_id] = author_counts.get(author_id, 0) + 1
+                            entry = rendered
+                            msg_id = msg_data.get("id")
+                            if msg_id is not None:
+                                entry = f"ID: {msg_id}\n{rendered}".strip()
+                            author_messages.setdefault(author_id, []).append(entry)
                         date_key = _date_key(msg_data.get("date"))
                         if date_key:
                             activity_counts[date_key] = activity_counts.get(date_key, 0) + 1
@@ -1343,10 +1358,23 @@ class App(ctk.CTk):
                         f"Сформировано: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
                         "",
                     ]
-                    for name, count_messages in sorted_authors:
-                        lines.append(f"## {name} — {count_messages}")
+                    lines.append("## Список участников")
+                    lines.append("")
+                    for author_id, count_messages in sorted_authors:
+                        meta = author_meta.get(author_id, {})
+                        name = meta.get("name") or "Без имени"
+                        username = meta.get("username") or ""
+                        display = f"{name} (@{username})" if username else name
+                        lines.append(f"- {display} — {count_messages}")
+                    lines.append("")
+                    for author_id, count_messages in sorted_authors:
+                        meta = author_meta.get(author_id, {})
+                        name = meta.get("name") or "Без имени"
+                        username = meta.get("username") or ""
+                        display = f"{name} (@{username})" if username else name
+                        lines.append(f"## {display} — {count_messages}")
                         lines.append("")
-                        for entry in author_messages.get(name, []):
+                        for entry in author_messages.get(author_id, []):
                             if entry:
                                 lines.append(entry)
                                 lines.append("")
