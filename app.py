@@ -76,6 +76,138 @@ def _write_fatal_error(exc: BaseException) -> None:
     except Exception:
         pass
 
+MARKDOWN_SETTINGS = {
+    "words_per_file": 50000,
+    "date_format": "DD.MM.YYYY",
+    "include_timestamps": True,
+    "include_author": True,
+    "include_replies": True,
+    "include_reactions": False,
+    "include_polls": False,
+    "include_forwarded": True,
+    "plain_text": True,
+}
+
+
+def _sanitize_md_filename(value: str) -> str:
+    cleaned = sanitize_filename(value).replace(" ", "_")
+    return cleaned if cleaned else "Telegram_Chat"
+
+
+def _strip_markdown(text: str) -> str:
+    cleaned = re.sub(r"\[([^\]]+)\]\(([^)]+)\)", r"\1 (\2)", text)
+    cleaned = cleaned.replace("**", "").replace("*", "").replace("`", "")
+    cleaned = re.sub(r" {2,}", " ", cleaned)
+    return cleaned
+
+
+def _format_reactions(reactions: list[dict]) -> str:
+    items = []
+    for reaction in reactions:
+        emoji = reaction.get("emoji")
+        count = reaction.get("count")
+        if emoji:
+            items.append(f"{emoji}×{count}")
+        else:
+            items.append(f"реакция×{count}")
+    return f"Реакции: {' · '.join(items)}"
+
+
+def _format_poll(poll: dict) -> str:
+    question = normalize_text(poll.get("question", "")).strip()
+    answers = poll.get("answers") or []
+    lines = []
+    for idx, answer in enumerate(answers, start=1):
+        text = normalize_text(answer.get("text", ""))
+        voters = answer.get("voters")
+        prefix = f"{idx}."
+        lines.append(f"{prefix} {text} — {voters}")
+    header = f"Опрос: {question}" if question else "Опрос"
+    total = poll.get("total_voters")
+    return f"{header}\n" + "\n".join(lines) + f"\nВсего голосов: {total}"
+
+
+def _build_topics_index(topic_map: dict[str, str]) -> str:
+    if not topic_map:
+        return ""
+    items = []
+    for topic_id, title in topic_map.items():
+        title = title.strip() if title and str(title).strip() else "Без названия"
+        items.append((topic_id, title))
+    items.sort(key=lambda x: (int(x[0]) if str(x[0]).isdigit() else 10**9, x[1]))
+    lines = [f"{idx}. {title} (topic_id={topic_id})" for idx, (topic_id, title) in enumerate(items, 1)]
+    return "# Темы чата (" + str(len(items)) + ")\n\n" + "\n".join(lines)
+
+
+def _build_topic_comment(topic_id: str | None, topic_map: dict[str, str]) -> str:
+    if not topic_id:
+        return ""
+    title = topic_map.get(topic_id, "")
+    if not title:
+        return f"<!-- topic_id={topic_id} -->\n"
+    safe_title = str(title).replace("--", "—").replace('"', '\\"').strip()
+    return f'<!-- topic_id={topic_id}; topic_title="{safe_title}" -->\n'
+
+
+def _resolve_topic_id(msg: dict, service_topic_by_id: dict[int, str]) -> str | None:
+    raw = msg.get("topic_id")
+    if raw is None and msg.get("reply_to_message_id") in service_topic_by_id:
+        raw = msg.get("reply_to_message_id")
+    if raw is None:
+        return None
+    return str(raw).strip() or None
+
+
+def _format_timestamp(value: str, date_format: str) -> str:
+    try:
+        date_str = value.replace("Z", "+00:00") if value else ""
+        dt = datetime.datetime.fromisoformat(date_str)
+        fmt_map = {
+            "DD.MM.YYYY": "%d.%m.%Y",
+            "YYYY-MM-DD": "%Y-%m-%d",
+            "MM/DD/YYYY": "%m/%d/%Y",
+        }
+        fmt = fmt_map.get(date_format, "%d.%m.%Y")
+        return dt.strftime(f"{fmt} %H:%M")
+    except Exception:
+        return value
+
+
+def _process_text(value, plain_text: bool) -> str:
+    text = normalize_text(value)
+    if plain_text:
+        text = _strip_markdown(text)
+    return text
+
+
+def _format_markdown_message(msg: dict) -> str:
+    parts = []
+    if MARKDOWN_SETTINGS["include_timestamps"]:
+        parts.append(f"[{_format_timestamp(msg.get('date', ''), MARKDOWN_SETTINGS['date_format'])}]")
+    if MARKDOWN_SETTINGS["include_author"] and msg.get("from"):
+        name = msg.get("from")
+        parts.append(f"{name}:" if MARKDOWN_SETTINGS["plain_text"] else f"**{name}**:")
+    header = " ".join(parts).strip()
+
+    body = _process_text(msg.get("text", ""), MARKDOWN_SETTINGS["plain_text"])
+
+    extras: list[str] = []
+    if MARKDOWN_SETTINGS["include_polls"] and msg.get("poll"):
+        extras.append(_format_poll(msg.get("poll") or {}))
+    if MARKDOWN_SETTINGS["include_reactions"] and msg.get("reactions"):
+        extras.append(_format_reactions(msg.get("reactions") or []))
+
+    if MARKDOWN_SETTINGS["include_forwarded"] and msg.get("forwarded_from"):
+        body = f"> Переслано от {msg['forwarded_from']}\n{body}"
+
+    if MARKDOWN_SETTINGS["include_replies"] and msg.get("reply_to_message_id"):
+        body = f"↪ ответ на сообщение #{msg['reply_to_message_id']}\n{body}"
+
+    combined = "\n\n".join([body, *extras]).strip()
+    if header:
+        return f"{header}\n{combined}".strip()
+    return combined
+
 def sanitize_filename(name: str) -> str:
     name = re.sub(r"[\\/:*?\"<>|]+", "_", name)
     name = re.sub(r"\s+", " ", name).strip()
@@ -830,6 +962,42 @@ class App(ctk.CTk):
                 self.queue.put(("export_error", msg))
                 return
             full_path = os.path.join(export_dir, "result.json")
+            md_prefix = _sanitize_md_filename(dialog.name or "Telegram Chat")
+            md_words_per_file = MARKDOWN_SETTINGS["words_per_file"]
+            md_current = ""
+            md_word_count = 0
+            md_next_index = 1
+            md_pending_first: str | None = None
+            md_written = 0
+            topic_map: dict[str, str] = {}
+            service_topic_by_id: dict[int, str] = {}
+            has_topics = False
+
+            def write_md_chunk(index: int, content: str) -> None:
+                nonlocal md_written
+                normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+                with_bom = "\ufeff" + normalized
+                md_path = os.path.join(export_dir, f"{md_prefix}_part_{index}.md")
+                with open(md_path, "w", encoding="utf-8") as mf:
+                    mf.write(with_bom)
+                md_written += 1
+
+            def add_md_chunk() -> None:
+                nonlocal md_current, md_word_count, md_pending_first, md_next_index
+                trimmed = md_current.strip()
+                if not trimmed:
+                    md_current = ""
+                    md_word_count = 0
+                    return
+                if md_pending_first is None:
+                    md_pending_first = trimmed
+                    if md_next_index == 1:
+                        md_next_index = 2
+                else:
+                    write_md_chunk(md_next_index, trimmed)
+                    md_next_index += 1
+                md_current = ""
+                md_word_count = 0
 
             total = None
             try:
@@ -846,16 +1014,69 @@ class App(ctk.CTk):
                 for msg in c.iter_messages(dialog, reverse=True):
                     if not first: f.write(",\n")
                     first = False
-                    json.dump(message_to_export(msg), f, ensure_ascii=False)
+                    msg_data = message_to_export(msg)
+                    json.dump(msg_data, f, ensure_ascii=False)
+
+                    if msg_data.get("type") != "message":
+                        if msg_data.get("topic_title"):
+                            has_topics = True
+                            service_topic_id = msg_data.get("topic_id") or msg_data.get("id")
+                            if service_topic_id is not None:
+                                service_topic_id = str(service_topic_id)
+                                topic_map[service_topic_id] = msg_data.get("topic_title") or ""
+                                if isinstance(msg_data.get("id"), int):
+                                    service_topic_by_id[msg_data["id"]] = msg_data.get("topic_title") or ""
+                        count += 1
+                        if total and count % 100 == 0:
+                            self.queue.put(("export_progress", (count, total)))
+                        elif not total and count % 200 == 0:
+                            self.queue.put(("export_progress", (count, None)))
+                        continue
+
+                    topic_id = _resolve_topic_id(msg_data, service_topic_by_id)
+                    if topic_id:
+                        has_topics = True
+                        if topic_id not in topic_map:
+                            topic_map[topic_id] = ""
+                        if msg_data.get("topic_title"):
+                            topic_map[topic_id] = msg_data.get("topic_title") or ""
+                    if msg_data.get("is_topic_message") or msg_data.get("is_forum_topic"):
+                        has_topics = True
+
+                    topic_comment = _build_topic_comment(topic_id, topic_map) if has_topics else ""
+                    formatted = _format_markdown_message(msg_data)
+                    rendered = f"{topic_comment}{formatted}" if topic_comment else formatted
+                    msg_words = len(rendered.split()) if rendered else 0
+                    if md_word_count + msg_words > md_words_per_file and md_current.strip():
+                        add_md_chunk()
+                    if rendered:
+                        md_current += rendered + "\n\n"
+                        md_word_count += msg_words
+
                     count += 1
                     if total and count % 100 == 0:
                         self.queue.put(("export_progress", (count, total)))
                     elif not total and count % 200 == 0:
                         self.queue.put(("export_progress", (count, None)))
                 f.write('\n  ]\n}\n')
+
+            add_md_chunk()
+            topics_index = _build_topics_index(topic_map)
+            if md_pending_first or topics_index:
+                first_content = ""
+                if topics_index:
+                    first_content = topics_index
+                if md_pending_first:
+                    first_content = f"{first_content}\n\n{md_pending_first}".strip()
+                if first_content:
+                    write_md_chunk(1, first_content)
+
             if total:
                 self.queue.put(("export_progress", (total, total)))
-            self.queue.put(("export_done", f"Готово: {full_path}"))
+            done_msg = f"Готово: {export_dir}"
+            if md_written:
+                done_msg += f" (Markdown файлов: {md_written})"
+            self.queue.put(("export_done", done_msg))
         except Exception as e:
             msg = str(e)
             if "WinError 2" in msg or "No such file" in msg:
