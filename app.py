@@ -449,6 +449,8 @@ class ChatListView(ctk.CTkFrame):
         self._folder_names = ["Все чаты"]
         self._folder_var = tk.StringVar(value="Все чаты")
         self._words_var = tk.IntVar(value=50)
+        self._popular_var = tk.BooleanVar(value=False)
+        self._popular_min_var = tk.StringVar(value="5")
         
         # Header / Toolbar
         self.toolbar = ctk.CTkFrame(self, fg_color="transparent", height=60)
@@ -482,20 +484,38 @@ class ChatListView(ctk.CTkFrame):
         # Words per file slider
         self.words_bar = ctk.CTkFrame(self, fg_color="transparent")
         self.words_bar.pack(fill="x", padx=20, pady=(0, 12))
-        self.words_label = ctk.CTkLabel(self.words_bar, text="Разбивка (тыс. слов)", text_color=COLORS["text_sec"])
-        self.words_label.pack(side="left")
-        self.words_value = ctk.CTkLabel(self.words_bar, text="50", text_color=COLORS["text_sec"])
-        self.words_value.pack(side="right")
+        self.words_label = ctk.CTkLabel(self.words_bar, text="Разбивка (слов)", text_color=COLORS["text_sec"])
+        self.words_label.grid(row=0, column=0, sticky="w")
+        self.words_value = ctk.CTkLabel(self.words_bar, text="50 000", text_color=COLORS["text_sec"])
+        self.words_value.grid(row=0, column=2, sticky="e")
         self.words_slider = ctk.CTkSlider(
             self.words_bar,
             from_=50,
             to=500,
             number_of_steps=45,
             command=self._on_words_change,
-            height=12,
+            height=8,
+            width=320,
         )
         self.words_slider.set(50)
-        self.words_slider.pack(fill="x", pady=(6, 0))
+        self.words_slider.grid(row=0, column=1, padx=(12, 12))
+        self.words_bar.grid_columnconfigure(1, weight=1)
+
+        # Popular messages toggle
+        self.popular_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self.popular_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.popular_check = ctk.CTkCheckBox(
+            self.popular_bar,
+            text="★ Популярные",
+            variable=self._popular_var,
+            command=self._on_popular_toggle,
+        )
+        self.popular_check.pack(side="left")
+        self.popular_hint = ctk.CTkLabel(self.popular_bar, text="порог реакций", text_color=COLORS["text_sec"])
+        self.popular_hint.pack(side="left", padx=(12, 6))
+        self.popular_entry = ctk.CTkEntry(self.popular_bar, textvariable=self._popular_min_var, width=70, height=28)
+        self.popular_entry.pack(side="left")
+        self.popular_entry.bind("<KeyRelease>", self._on_popular_min_change)
 
         # Search
         self.search_entry = ModernEntry(self, placeholder_text="Поиск чатов...")
@@ -587,6 +607,9 @@ class ChatListView(ctk.CTkFrame):
         query = self.search_entry.get().strip()
         self.app.filter_chats(query)
 
+    def _format_words(self, value: int) -> str:
+        return f"{value:,}".replace(",", " ")
+
     def _on_words_change(self, value):
         rounded = int(round(value / 10) * 10)
         if rounded < 50:
@@ -594,8 +617,23 @@ class ChatListView(ctk.CTkFrame):
         if rounded > 500:
             rounded = 500
         self._words_var.set(rounded)
-        self.words_value.configure(text=str(rounded))
+        self.words_value.configure(text=self._format_words(rounded * 1000))
         self.app.set_md_words_per_file(rounded * 1000)
+
+    def _on_popular_toggle(self):
+        self.app.set_popular_enabled(bool(self._popular_var.get()))
+
+    def _on_popular_min_change(self, event=None):
+        raw = (self._popular_min_var.get() or "").strip()
+        if not raw:
+            return
+        if not raw.isdigit():
+            return
+        value = int(raw)
+        if value < 1:
+            value = 1
+            self._popular_min_var.set("1")
+        self.app.set_popular_min_reactions(value)
 
     def _get_selected_dialog(self):
         selection = self.listbox.curselection()
@@ -701,6 +739,8 @@ class App(ctk.CTk):
         self.folder_peers = {}
         self.current_folder = "Все чаты"
         self.md_words_per_file = 50000
+        self.popular_enabled = False
+        self.popular_min_reactions = 5
         
         self._tg_queue = queue.Queue()
         self.queue = queue.Queue()
@@ -944,6 +984,12 @@ class App(ctk.CTk):
     def set_md_words_per_file(self, value: int):
         self.md_words_per_file = max(10000, int(value))
 
+    def set_popular_enabled(self, value: bool):
+        self.popular_enabled = bool(value)
+
+    def set_popular_min_reactions(self, value: int):
+        self.popular_min_reactions = max(1, int(value))
+
     def logout(self):
         self._run_bg(self._logout_task)
 
@@ -1002,6 +1048,10 @@ class App(ctk.CTk):
             md_next_index = 1
             md_pending_first: str | None = None
             md_written = 0
+            popular_enabled = self.popular_enabled
+            popular_min = self.popular_min_reactions
+            popular_entries: list[str] = []
+            popular_written = False
             topic_map: dict[str, str] = {}
             service_topic_by_id: dict[int, str] = {}
             has_topics = False
@@ -1086,6 +1136,17 @@ class App(ctk.CTk):
                         md_current += rendered + "\n\n"
                         md_word_count += msg_words
 
+                        if popular_enabled:
+                            reactions = msg_data.get("reactions") or []
+                            total_reactions = 0
+                            for reaction in reactions:
+                                try:
+                                    total_reactions += int(reaction.get("count", 0))
+                                except Exception:
+                                    continue
+                            if total_reactions >= popular_min:
+                                popular_entries.append(rendered)
+
                     count += 1
                     if total and count % 100 == 0:
                         self.queue.put(("export_progress", (count, total)))
@@ -1104,11 +1165,25 @@ class App(ctk.CTk):
                 if first_content:
                     write_md_chunk(1, first_content)
 
+            if popular_enabled:
+                header = f"# Популярные сообщения (>= {popular_min} реакций)"
+                content = header
+                if popular_entries:
+                    content = header + "\n\n" + "\n\n".join(popular_entries)
+                pop_path = os.path.join(export_dir, f"{md_prefix}_popular.md")
+                normalized = content.replace("\r\n", "\n").replace("\r", "\n")
+                with_bom = "\ufeff" + normalized
+                with open(pop_path, "w", encoding="utf-8") as pf:
+                    pf.write(with_bom)
+                popular_written = True
+
             if total:
                 self.queue.put(("export_progress", (total, total)))
             done_msg = f"Готово: {export_dir}"
             if md_written:
                 done_msg += f" (Markdown файлов: {md_written})"
+            if popular_written:
+                done_msg += f", popular: {md_prefix}_popular.md"
             self.queue.put(("export_done", done_msg))
         except Exception as e:
             msg = str(e)
