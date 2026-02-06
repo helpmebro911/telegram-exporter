@@ -451,6 +451,7 @@ class ChatListView(ctk.CTkFrame):
         self._words_var = tk.IntVar(value=50)
         self._popular_var = tk.BooleanVar(value=False)
         self._popular_min_var = tk.StringVar(value="5")
+        self._analytics_var = tk.BooleanVar(value=False)
         
         # Header / Toolbar
         self.toolbar = ctk.CTkFrame(self, fg_color="transparent", height=60)
@@ -480,6 +481,14 @@ class ChatListView(ctk.CTkFrame):
             height=32,
         )
         self.folder_menu.pack(side="left", padx=(10, 0))
+        self.export_folder_btn = ModernButton(
+            self.folder_bar,
+            text="Экспортировать папку",
+            variant="secondary",
+            width=200,
+            command=self._export_folder,
+        )
+        self.export_folder_btn.pack(side="left", padx=(10, 0))
 
         # Words per file slider
         self.words_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -517,6 +526,16 @@ class ChatListView(ctk.CTkFrame):
         self.popular_entry = ctk.CTkEntry(self.popular_bar, textvariable=self._popular_min_var, width=70, height=28)
         self.popular_entry.pack(side="left")
         self.popular_entry.bind("<KeyRelease>", self._on_popular_min_change)
+
+        self.analytics_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self.analytics_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.analytics_check = ctk.CTkCheckBox(
+            self.analytics_bar,
+            text="Аналитика (топ авторов + активность)",
+            variable=self._analytics_var,
+            command=self._on_analytics_toggle,
+        )
+        self.analytics_check.pack(side="left")
 
         # Search
         self.search_entry = ModernEntry(self, placeholder_text="Поиск чатов...")
@@ -636,6 +655,30 @@ class ChatListView(ctk.CTkFrame):
             self._popular_min_var.set("1")
         self.app.set_popular_min_reactions(value)
 
+    def _on_analytics_toggle(self):
+        enabled = bool(self._analytics_var.get())
+        self.app.set_analytics_enabled(enabled)
+        query = self.search_entry.get().strip()
+        self.app.filter_chats(query)
+
+    def _export_folder(self):
+        self.app.export_current_folder()
+
+    def show_folder_progress(self, current, total, label, log_lines=None):
+        if not total:
+            return
+        self.progress_chat_label.configure(text=f"Чат {current}/{total}")
+        text = f"Экспорт папки: {current}/{total} • {label}"
+        if log_lines:
+            text += "\n" + "\n".join(log_lines)
+        self.status_lbl.configure(text=text)
+
+    def show_folder_done(self, total, log_lines=None):
+        text = f"Экспорт папки завершен. Чатов: {total}"
+        if log_lines:
+            text += "\n" + "\n".join(log_lines)
+        self.status_lbl.configure(text=text)
+
     def _get_selected_dialog(self):
         selection = self.listbox.curselection()
         if not selection:
@@ -742,6 +785,14 @@ class App(ctk.CTk):
         self.md_words_per_file = 50000
         self.popular_enabled = False
         self.popular_min_reactions = 5
+        self.analytics_enabled = False
+        self._folder_active = False
+        self._folder_queue = []
+        self._folder_total = 0
+        self._folder_index = 0
+        self._folder_export_base = None
+        self._folder_log = []
+        self._folder_current_label = ""
         
         self._tg_queue = queue.Queue()
         self.queue = queue.Queue()
@@ -785,6 +836,7 @@ class App(ctk.CTk):
     def show_export_dialog(self, dialog):
         path = filedialog.askdirectory(title="Куда сохранить экспорт?")
         if not path: return
+        self._folder_active = False
         self.chats_view.status_lbl.configure(text="")
         self._run_bg(self._export_task, dialog, path)
 
@@ -958,20 +1010,7 @@ class App(ctk.CTk):
             self.queue.put(("error", str(e)))
 
     def filter_chats(self, query):
-        dialogs = self.all_dialogs
-        folder_name = self.current_folder
-        if folder_name and folder_name != "Все чаты":
-            peer_ids = self.folder_peers.get(folder_name, set())
-            if peer_ids:
-                filtered = []
-                for d in dialogs:
-                    try:
-                        pid = get_peer_id(d.entity)
-                    except Exception:
-                        pid = d.id
-                    if pid in peer_ids:
-                        filtered.append(d)
-                dialogs = filtered
+        dialogs = self._get_folder_dialogs(self.current_folder)
         if not query:
             self.chats_view.render_chats(dialogs)
             return
@@ -990,6 +1029,84 @@ class App(ctk.CTk):
 
     def set_popular_min_reactions(self, value: int):
         self.popular_min_reactions = max(1, int(value))
+
+    def set_analytics_enabled(self, value: bool):
+        self.analytics_enabled = bool(value)
+
+    def _is_group_chat(self, dialog) -> bool:
+        entity = getattr(dialog, "entity", None)
+        if entity is None:
+            return False
+        if getattr(entity, "broadcast", False):
+            return False
+        if getattr(entity, "megagroup", False) or getattr(entity, "gigagroup", False):
+            return True
+        if entity.__class__.__name__ == "Chat":
+            return True
+        return False
+
+    def _get_folder_dialogs(self, folder_name: str):
+        dialogs = self.all_dialogs
+        if folder_name and folder_name != "Все чаты":
+            peer_ids = self.folder_peers.get(folder_name, set())
+            if peer_ids:
+                filtered = []
+                for d in dialogs:
+                    try:
+                        pid = get_peer_id(d.entity)
+                    except Exception:
+                        pid = d.id
+                    if pid in peer_ids:
+                        filtered.append(d)
+                dialogs = filtered
+        if self.analytics_enabled:
+            dialogs = [d for d in dialogs if self._is_group_chat(d)]
+        return dialogs
+
+    def export_current_folder(self):
+        folder_name = self.current_folder
+        if not folder_name or folder_name == "Все чаты":
+            self.queue.put(("error", "Выберите папку для экспорта."))
+            return
+        dialogs = self._get_folder_dialogs(folder_name)
+        if not dialogs:
+            self.queue.put(("error", "В выбранной папке нет чатов."))
+            return
+        path = filedialog.askdirectory(title="Куда сохранить экспорт папки?")
+        if not path:
+            return
+        self._folder_queue = dialogs
+        self._folder_total = len(dialogs)
+        self._folder_index = 0
+        self._folder_export_base = os.path.join(path, sanitize_filename(folder_name))
+        try:
+            os.makedirs(self._folder_export_base, exist_ok=True)
+        except Exception as e:
+            self.queue.put(("error", str(e)))
+            return
+        self._folder_active = True
+        self._folder_log = []
+        self._folder_current_label = ""
+        self.queue.put(("folder_progress", (0, self._folder_total, folder_name)))
+        self._export_next_in_folder()
+
+    def _export_next_in_folder(self):
+        if self._folder_index >= self._folder_total:
+            self._folder_active = False
+            self.queue.put(("folder_done", self._folder_total))
+            return
+        dialog = self._folder_queue[self._folder_index]
+        self._folder_index += 1
+        self._folder_current_label = dialog.name or "Чат"
+        self.queue.put(("folder_progress", (self._folder_index, self._folder_total, self._folder_current_label)))
+        self._run_bg(self._export_task, dialog, self._folder_export_base)
+
+    def _append_folder_log(self, ok: bool):
+        name = self._folder_current_label or "Чат"
+        prefix = "OK" if ok else "ERR"
+        self._folder_log.append(f"{prefix}: {name}")
+        if len(self._folder_log) > 5:
+            self._folder_log = self._folder_log[-5:]
 
     def logout(self):
         self._run_bg(self._logout_task)
@@ -1056,6 +1173,19 @@ class App(ctk.CTk):
             topic_map: dict[str, str] = {}
             service_topic_by_id: dict[int, str] = {}
             has_topics = False
+            analytics_enabled = self.analytics_enabled and self._is_group_chat(dialog)
+            author_counts: dict[str, int] = {}
+            author_messages: dict[str, list[str]] = {}
+            activity_counts: dict[str, int] = {}
+
+            def _date_key(value: str | None) -> str | None:
+                if not value:
+                    return None
+                if "T" in value:
+                    return value.split("T")[0]
+                if " " in value:
+                    return value.split(" ")[0]
+                return value[:10] if len(value) >= 10 else value
 
             def write_md_chunk(index: int, content: str) -> None:
                 nonlocal md_written
@@ -1130,6 +1260,21 @@ class App(ctk.CTk):
                     topic_comment = _build_topic_comment(topic_id, topic_map) if has_topics else ""
                     formatted = _format_markdown_message(msg_data)
                     rendered = f"{topic_comment}{formatted}" if topic_comment else formatted
+
+                    if analytics_enabled:
+                        author = (msg_data.get("from") or "Без имени").strip()
+                        if not author:
+                            author = "Без имени"
+                        author_counts[author] = author_counts.get(author, 0) + 1
+                        entry = rendered
+                        msg_id = msg_data.get("id")
+                        if msg_id is not None:
+                            entry = f"ID: {msg_id}\n{rendered}".strip()
+                        author_messages.setdefault(author, []).append(entry)
+                        date_key = _date_key(msg_data.get("date"))
+                        if date_key:
+                            activity_counts[date_key] = activity_counts.get(date_key, 0) + 1
+
                     msg_words = len(rendered.split()) if rendered else 0
                     if md_word_count + msg_words > md_words_per_file and md_current.strip():
                         add_md_chunk()
@@ -1178,6 +1323,46 @@ class App(ctk.CTk):
                     pf.write(with_bom)
                 popular_written = True
 
+            analytics_written = []
+            if analytics_enabled:
+                if author_counts:
+                    sorted_authors = sorted(author_counts.items(), key=lambda x: x[1], reverse=True)
+                    lines = [
+                        f"# Топ активных участников ({len(sorted_authors)})",
+                        "",
+                        f"Сформировано: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
+                        "",
+                    ]
+                    for name, count_messages in sorted_authors:
+                        lines.append(f"## {name} — {count_messages}")
+                        lines.append("")
+                        for entry in author_messages.get(name, []):
+                            if entry:
+                                lines.append(entry)
+                                lines.append("")
+                    top_path = os.path.join(export_dir, "top_authors.md")
+                    normalized = "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n")
+                    with_bom = "\ufeff" + normalized.strip() + "\n"
+                    with open(top_path, "w", encoding="utf-8") as tf:
+                        tf.write(with_bom)
+                    analytics_written.append("top_authors.md")
+
+                if activity_counts:
+                    lines = [
+                        "# Активность по дням",
+                        "",
+                        "| Дата | Сообщений |",
+                        "| --- | --- |",
+                    ]
+                    for day in sorted(activity_counts.keys()):
+                        lines.append(f"| {day} | {activity_counts[day]} |")
+                    act_path = os.path.join(export_dir, "activity.md")
+                    normalized = "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n")
+                    with_bom = "\ufeff" + normalized.strip() + "\n"
+                    with open(act_path, "w", encoding="utf-8") as af:
+                        af.write(with_bom)
+                    analytics_written.append("activity.md")
+
             if total:
                 self.queue.put(("export_progress", (total, total)))
             done_msg = f"Готово: {export_dir}"
@@ -1185,6 +1370,8 @@ class App(ctk.CTk):
                 done_msg += f" (Markdown файлов: {md_written})"
             if popular_written:
                 done_msg += f", popular: {md_prefix}_popular.md"
+            if analytics_written:
+                done_msg += f", аналитика: {', '.join(analytics_written)}"
             self.queue.put(("export_done", done_msg))
         except Exception as e:
             msg = str(e)
@@ -1223,7 +1410,9 @@ class App(ctk.CTk):
                 elif kind == "info": messagebox.showinfo("Инфо", data)
                 elif kind == "code_sent": self.login_view.show_code_input()
                 elif kind == "login_success": self.show_chats()
-                elif kind == "chats_loaded": self.chats_view.render_chats(data)
+                elif kind == "chats_loaded":
+                    query = self.chats_view.search_entry.get().strip()
+                    self.filter_chats(query)
                 elif kind == "folders_loaded": self.chats_view.set_folders(data)
                 elif kind == "export_start":
                     chat_name, total = data
@@ -1233,8 +1422,19 @@ class App(ctk.CTk):
                     self.chats_view.update_export_progress(count, total)
                 elif kind == "export_done":
                     self.chats_view.finish_export(True, data)
+                    if self._folder_active:
+                        self._append_folder_log(True)
+                        self._export_next_in_folder()
                 elif kind == "export_error":
                     self.chats_view.finish_export(False, data)
+                    if self._folder_active:
+                        self._append_folder_log(False)
+                        self._export_next_in_folder()
+                elif kind == "folder_progress":
+                    current, total, label = data
+                    self.chats_view.show_folder_progress(current, total, label, self._folder_log)
+                elif kind == "folder_done":
+                    self.chats_view.show_folder_done(data, self._folder_log)
                 elif kind == "logout_done": self.show_login()
         except queue.Empty: pass
         self.after(100, self._process_queue)
