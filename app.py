@@ -400,6 +400,12 @@ class LoginView(ctk.CTkFrame):
         
         self.settings_btn = ModernButton(self.center_box, text="Настроить API ключи", variant="secondary", command=self.app.show_settings)
         self.settings_btn.pack(pady=(0, 20), padx=40, fill="x")
+        self.clear_api_btn = ModernButton(
+            self.center_box,
+            text="Сбросить API ключи",
+            variant="secondary",
+            command=self._on_clear_api,
+        )
 
         # Phone Input
         self.phone_entry = ModernEntry(self.center_box, placeholder_text="Телефон (+7...)")
@@ -417,13 +423,20 @@ class LoginView(ctk.CTkFrame):
     def refresh_state(self):
         if self.app.has_api_creds():
             self.api_status_lbl.configure(text="API ключи настроены", text_color=COLORS["success"])
-            self.settings_btn.pack_forget()
+            self.settings_btn.configure(text="Изменить API ключи")
+            if self.settings_btn.winfo_ismapped() == 0:
+                self.settings_btn.pack(pady=(0, 10), padx=40, fill="x", before=self.phone_entry)
+            if self.clear_api_btn.winfo_ismapped() == 0:
+                self.clear_api_btn.pack(pady=(0, 20), padx=40, fill="x", before=self.phone_entry)
             self.phone_entry.configure(state="normal")
             self.action_btn.configure(state="normal")
         else:
             self.api_status_lbl.configure(text="Сначала укажите API ID/Hash", text_color=COLORS["error"])
             self.phone_entry.configure(state="disabled")
             self.action_btn.configure(state="disabled")
+            if self.clear_api_btn.winfo_ismapped() == 1:
+                self.clear_api_btn.pack_forget()
+            self.settings_btn.configure(text="Настроить API ключи")
             if self.settings_btn.winfo_ismapped() == 0:
                 self.settings_btn.pack(pady=(0, 20), padx=40, fill="x", before=self.phone_entry)
 
@@ -444,6 +457,14 @@ class LoginView(ctk.CTkFrame):
         self.code_entry.pack(padx=40, pady=(10, 0), fill="x", after=self.phone_entry)
         self.password_entry.pack(padx=40, pady=(10, 0), fill="x", after=self.code_entry)
         self.action_btn.configure(text="Войти")
+
+    def _on_clear_api(self):
+        ok = messagebox.askyesno(
+            "Сбросить API ключи",
+            "Удалить сохраненные API ID/Hash и сессию?\nПосле этого нужно будет ввести ключи заново.",
+        )
+        if ok:
+            self.app.clear_api_creds()
 
 
 class ChatListView(ctk.CTkFrame):
@@ -872,6 +893,21 @@ class App(ctk.CTk):
             "api_hash": api_hash,
             "session": self.api_creds.get("session"),
         }
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, "w") as f:
+            json.dump(self.api_creds, f)
+        self.login_view.refresh_state()
+
+    def clear_api_creds(self):
+        try:
+            if self.client:
+                self.client.disconnect()
+                self.client = None
+        except Exception:
+            pass
+        self.phone_hash = None
+        self.phone_number = None
+        self.api_creds = {}
         os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
         with open(self.config_path, "w") as f:
             json.dump(self.api_creds, f)
