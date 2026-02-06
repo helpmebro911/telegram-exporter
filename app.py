@@ -736,7 +736,7 @@ class App(ctk.CTk):
             folder_peers = {}
             folder_names = []
             for f in (filters or []):
-                title = getattr(f, "title", None)
+                title = normalize_text(getattr(f, "title", None))
                 include_peers = getattr(f, "include_peers", None)
                 if not title or not include_peers:
                     continue
