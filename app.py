@@ -288,9 +288,11 @@ def message_to_export(message) -> dict:
     msg_type = "service" if message.action else "message"
     sender = None
     username = None
+    sender_type = None
     if message.sender:
         sender = get_display_name(message.sender)
         username = getattr(message.sender, "username", None)
+        sender_type = type(message.sender).__name__
     
     raw_text = getattr(message, "raw_text", None)
     msg_text = raw_text if raw_text is not None else message.message
@@ -301,9 +303,11 @@ def message_to_export(message) -> dict:
         "date": message.date.isoformat(),
         "from": sender,
         "from_username": username,
+        "from_type": sender_type,
         "from_id": message.sender_id,
         "text": normalize_text(msg_text),
     }
+    msg["is_post"] = bool(getattr(message, "post", False))
 
     if message.reply_to_msg_id: msg["reply_to_message_id"] = message.reply_to_msg_id
     reply_to = getattr(message, "reply_to", None)
@@ -1214,6 +1218,10 @@ class App(ctk.CTk):
             debug_invalid_dates = 0
             debug_popular_max = 0
             debug_popular_count = 0
+            debug_sender_types: dict[str, int] = {}
+            debug_post_msgs = 0
+            debug_non_user_positive = 0
+            debug_post_positive = 0
 
             _debug_log(
                 "app.py:_export_task:start",
@@ -1341,11 +1349,19 @@ class App(ctk.CTk):
                             if msg_id is not None:
                                 entry = f"ID: {msg_id}\n{rendered}".strip()
                             author_messages.setdefault(author_id, []).append(entry)
+                            sender_type = msg_data.get("from_type") or "Unknown"
+                            debug_sender_types[sender_type] = debug_sender_types.get(sender_type, 0) + 1
+                            if sender_type != "User":
+                                debug_non_user_positive += 1
+                            if msg_data.get("is_post"):
+                                debug_post_positive += 1
                         date_key = _date_key(msg_data.get("date"))
                         if date_key:
                             activity_counts[date_key] = activity_counts.get(date_key, 0) + 1
                         else:
                             debug_invalid_dates += 1
+                        if msg_data.get("is_post"):
+                            debug_post_msgs += 1
 
                     msg_words = len(rendered.split()) if rendered else 0
                     if md_word_count + msg_words > md_words_per_file and md_current.strip():
@@ -1516,6 +1532,10 @@ class App(ctk.CTk):
                         "unique_authors": len(author_counts),
                         "activity_days": len(activity_counts),
                         "invalid_dates": debug_invalid_dates,
+                        "sender_types": debug_sender_types,
+                        "post_msgs": debug_post_msgs,
+                        "non_user_positive": debug_non_user_positive,
+                        "post_positive": debug_post_positive,
                     },
                     "H2",
                 )
