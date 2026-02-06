@@ -13,12 +13,14 @@
 ## Скачать и установить
 
 ### macOS
-1) Скачай `TelegramExporter.dmg` из **Releases**
+1) Скачай `TelegramExporter.dmg` из **Releases**  
+   или архив `TelegramExporter.zip` (внутри и macOS, и Windows)
 2) Открой DMG → перетащи приложение в **Applications**
 3) Запусти приложение
 
 ### Windows
-1) Скачай `TelegramExporterSetup.exe` из **Releases**
+1) Скачай `TelegramExporterSetup.exe` из **Releases**  
+   или архив `TelegramExporter.zip` (внутри и macOS, и Windows)
 2) Запусти установщик → Next → Install
 
 ### Первый запуск без подписи (macOS)

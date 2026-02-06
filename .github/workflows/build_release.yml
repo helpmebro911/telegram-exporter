@@ -55,6 +55,10 @@ jobs:
           mkdir -p release
           cp dist/telegramexporter-macos/TelegramExporter.dmg release/
           cp dist/telegramexporter-windows/TelegramExporterSetup.exe release/
+      - name: Create combined archive
+        run: |
+          cd release
+          zip -j TelegramExporter.zip TelegramExporter.dmg TelegramExporterSetup.exe
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2
         with:
