@@ -8,7 +8,6 @@ import threading
 import tkinter as tk
 import platform
 import traceback
-import time
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional
@@ -19,27 +18,6 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 from telethon.utils import get_display_name, get_peer_id
-
-# Debug logging (temporary)
-DEBUG_LOG_PATH = "/Users/max/Documents/Cursor/Парсер тг/.cursor/debug.log"
-
-def _debug_log(location: str, message: str, data: dict, hypothesis_id: str, run_id: str = "debug-run") -> None:
-    # #region agent log
-    try:
-        payload = {
-            "sessionId": "debug-session",
-            "runId": run_id,
-            "hypothesisId": hypothesis_id,
-            "location": location,
-            "message": message,
-            "data": data,
-            "timestamp": int(time.time() * 1000),
-        }
-        with open(DEBUG_LOG_PATH, "a", encoding="utf-8") as lf:
-            lf.write(json.dumps(payload, ensure_ascii=False) + "\n")
-    except Exception:
-        pass
-    # #endregion
 
 # --- CONFIG & THEME ---
 
@@ -288,19 +266,9 @@ def message_to_export(message) -> dict:
     msg_type = "service" if message.action else "message"
     sender = None
     username = None
-    sender_type = None
-    from_peer_type = None
-    has_post_author = False
-    is_out = False
     if message.sender:
         sender = get_display_name(message.sender)
         username = getattr(message.sender, "username", None)
-        sender_type = type(message.sender).__name__
-    raw_from = getattr(message, "from_id", None)
-    if raw_from is not None:
-        from_peer_type = type(raw_from).__name__
-    has_post_author = bool(getattr(message, "post_author", None))
-    is_out = bool(getattr(message, "out", False))
     
     raw_text = getattr(message, "raw_text", None)
     msg_text = raw_text if raw_text is not None else message.message
@@ -311,14 +279,9 @@ def message_to_export(message) -> dict:
         "date": message.date.isoformat(),
         "from": sender,
         "from_username": username,
-        "from_type": sender_type,
-        "from_peer_type": from_peer_type,
         "from_id": message.sender_id,
         "text": normalize_text(msg_text),
     }
-    msg["is_post"] = bool(getattr(message, "post", False))
-    msg["has_post_author"] = has_post_author
-    msg["out"] = is_out
 
     if message.reply_to_msg_id: msg["reply_to_message_id"] = message.reply_to_msg_id
     reply_to = getattr(message, "reply_to", None)
@@ -1223,49 +1186,7 @@ class App(ctk.CTk):
             author_messages: dict[int, list[str]] = {}
             author_meta: dict[int, dict[str, str]] = {}
             activity_counts: dict[str, int] = {}
-            debug_total_msgs = 0
-            debug_valid_authors = 0
-            debug_invalid_authors = 0
-            debug_invalid_dates = 0
-            debug_popular_max = 0
-            debug_popular_count = 0
-            debug_sender_types: dict[str, int] = {}
-            debug_peer_types: dict[str, int] = {}
-            debug_post_msgs = 0
-            debug_non_user_positive = 0
-            debug_post_positive = 0
-            debug_post_author_msgs = 0
-            debug_sender_matches_dialog = 0
-            debug_author_id_negative = 0
-            debug_out_msgs = 0
-            debug_self_matches = 0
-            debug_skipped_out = 0
-            dialog_entity_id = getattr(getattr(dialog, "entity", None), "id", None)
-            self_user_id = None
-            try:
-                me = c.get_me()
-                self_user_id = getattr(me, "id", None)
-            except Exception:
-                self_user_id = None
-
-            _debug_log(
-                "app.py:_export_task:start",
-                "export_flags",
-                {
-                    "is_forum": is_forum,
-                    "analytics_enabled": analytics_enabled,
-                    "popular_enabled": popular_enabled,
-                    "entity_type": type(getattr(dialog, "entity", None)).__name__,
-                    "entity_id": dialog_entity_id,
-                    "self_user_id": self_user_id,
-                    "entity_flags": {
-                        "broadcast": bool(getattr(getattr(dialog, "entity", None), "broadcast", False)),
-                        "megagroup": bool(getattr(getattr(dialog, "entity", None), "megagroup", False)),
-                        "gigagroup": bool(getattr(getattr(dialog, "entity", None), "gigagroup", False)),
-                    },
-                },
-                "H1",
-            )
+            
 
             def _date_key(value: str | None) -> str | None:
                 if not value:
@@ -1315,6 +1236,7 @@ class App(ctk.CTk):
                 first = True
                 count = 0
                 for msg in c.iter_messages(dialog, reverse=True):
+                    is_out = bool(getattr(msg, "out", False))
                     if not first: f.write(",\n")
                     first = False
                     msg_data = message_to_export(msg)
@@ -1351,17 +1273,9 @@ class App(ctk.CTk):
                         topic_comment = _build_topic_comment(topic_id, topic_map) if has_topics else ""
                     formatted = _format_markdown_message(msg_data)
                     rendered = f"{topic_comment}{formatted}" if topic_comment else formatted
-                    debug_total_msgs += 1
-
                     if analytics_enabled:
-                        is_out = bool(msg_data.get("out"))
-                        if is_out:
-                            debug_skipped_out += 1
                         author_id = msg_data.get("from_id")
-                        if not isinstance(author_id, int) or author_id <= 0:
-                            author_id = None
-                            debug_invalid_authors += 1
-                        elif not is_out:
+                        if not is_out and isinstance(author_id, int) and author_id > 0:
                             author = (msg_data.get("from") or "Без имени").strip()
                             if not author:
                                 author = "Без имени"
@@ -1373,39 +1287,14 @@ class App(ctk.CTk):
                                 meta["username"] = username
                             author_meta[author_id] = meta
                             author_counts[author_id] = author_counts.get(author_id, 0) + 1
-                            debug_valid_authors += 1
                             entry = rendered
                             msg_id = msg_data.get("id")
                             if msg_id is not None:
                                 entry = f"ID: {msg_id}\n{rendered}".strip()
                             author_messages.setdefault(author_id, []).append(entry)
-                            sender_type = msg_data.get("from_type") or "Unknown"
-                            debug_sender_types[sender_type] = debug_sender_types.get(sender_type, 0) + 1
-                            peer_type = msg_data.get("from_peer_type") or "Unknown"
-                            debug_peer_types[peer_type] = debug_peer_types.get(peer_type, 0) + 1
-                            if sender_type != "User":
-                                debug_non_user_positive += 1
-                            if msg_data.get("is_post"):
-                                debug_post_positive += 1
-                            if msg_data.get("has_post_author"):
-                                debug_post_author_msgs += 1
-                            if isinstance(author_id, int) and author_id < 0:
-                                debug_author_id_negative += 1
-                            if dialog_entity_id and author_id == dialog_entity_id:
-                                debug_sender_matches_dialog += 1
                         date_key = _date_key(msg_data.get("date"))
                         if date_key:
                             activity_counts[date_key] = activity_counts.get(date_key, 0) + 1
-                        else:
-                            debug_invalid_dates += 1
-                        if msg_data.get("is_post"):
-                            debug_post_msgs += 1
-                        if msg_data.get("has_post_author"):
-                            debug_post_author_msgs += 1
-                        if msg_data.get("out"):
-                            debug_out_msgs += 1
-                        if self_user_id and author_id == self_user_id:
-                            debug_self_matches += 1
 
                     msg_words = len(rendered.split()) if rendered else 0
                     if md_word_count + msg_words > md_words_per_file and md_current.strip():
@@ -1437,17 +1326,6 @@ class App(ctk.CTk):
 
             add_md_chunk()
             topics_index = _build_topics_index(topic_map) if is_forum else ""
-            _debug_log(
-                "app.py:_export_task:topics",
-                "topics_summary",
-                {
-                    "is_forum": is_forum,
-                    "topic_map_count": len(topic_map),
-                    "topics_index_len": len(topics_index),
-                    "has_topics": has_topics,
-                },
-                "H1",
-            )
             if md_pending_first or topics_index:
                 first_content = ""
                 if topics_index:
@@ -1471,16 +1349,6 @@ class App(ctk.CTk):
                 with open(pop_path, "w", encoding="utf-8") as pf:
                     pf.write(with_bom)
                 popular_written = True
-                _debug_log(
-                    "app.py:_export_task:popular",
-                    "popular_summary",
-                    {
-                        "popular_count": debug_popular_count,
-                        "popular_max": debug_popular_max,
-                        "threshold": popular_min,
-                    },
-                    "H3",
-                )
 
             analytics_written = []
             if analytics_enabled:
@@ -1566,30 +1434,6 @@ class App(ctk.CTk):
                     with open(act_path, "w", encoding="utf-8") as af:
                         af.write(with_bom)
                     analytics_written.append("activity.md")
-                _debug_log(
-                    "app.py:_export_task:analytics",
-                    "analytics_summary",
-                    {
-                        "total_msgs": debug_total_msgs,
-                        "valid_authors_msgs": debug_valid_authors,
-                        "invalid_authors_msgs": debug_invalid_authors,
-                        "unique_authors": len(author_counts),
-                        "activity_days": len(activity_counts),
-                        "invalid_dates": debug_invalid_dates,
-                        "sender_types": debug_sender_types,
-                        "peer_types": debug_peer_types,
-                        "post_msgs": debug_post_msgs,
-                        "non_user_positive": debug_non_user_positive,
-                        "post_positive": debug_post_positive,
-                        "post_author_msgs": debug_post_author_msgs,
-                        "sender_matches_dialog": debug_sender_matches_dialog,
-                        "author_id_negative": debug_author_id_negative,
-                        "out_msgs": debug_out_msgs,
-                        "self_matches": debug_self_matches,
-                        "skipped_out": debug_skipped_out,
-                    },
-                    "H2",
-                )
 
             if total:
                 self.queue.put(("export_progress", (total, total)))
