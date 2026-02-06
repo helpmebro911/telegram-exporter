@@ -1239,6 +1239,7 @@ class App(ctk.CTk):
             debug_author_id_negative = 0
             debug_out_msgs = 0
             debug_self_matches = 0
+            debug_skipped_out = 0
             dialog_entity_id = getattr(getattr(dialog, "entity", None), "id", None)
             self_user_id = None
             try:
@@ -1353,11 +1354,14 @@ class App(ctk.CTk):
                     debug_total_msgs += 1
 
                     if analytics_enabled:
+                        is_out = bool(msg_data.get("out"))
+                        if is_out:
+                            debug_skipped_out += 1
                         author_id = msg_data.get("from_id")
                         if not isinstance(author_id, int) or author_id <= 0:
                             author_id = None
                             debug_invalid_authors += 1
-                        else:
+                        elif not is_out:
                             author = (msg_data.get("from") or "Без имени").strip()
                             if not author:
                                 author = "Без имени"
@@ -1582,6 +1586,7 @@ class App(ctk.CTk):
                         "author_id_negative": debug_author_id_negative,
                         "out_msgs": debug_out_msgs,
                         "self_matches": debug_self_matches,
+                        "skipped_out": debug_skipped_out,
                     },
                     "H2",
                 )
