@@ -23,6 +23,62 @@
    или архив `TelegramExporter.zip` (внутри и macOS, и Windows)
 2) Запусти установщик → Next → Install
 
+## Полный запуск вручную (если нет релиза)
+
+### macOS — пошагово
+1) Открой **Terminal** (⌘+Space → введи “Terminal” → Enter)
+2) Перейди в папку проекта:
+```
+cd "/Users/ТВОЁ_ИМЯ/Documents/Cursor/Парсер тг"
+```
+3) Создай виртуальное окружение:
+```
+python3 -m venv .venv
+```
+4) Активируй окружение:
+```
+source .venv/bin/activate
+```
+5) Установи зависимости:
+```
+pip install -r requirements.txt
+```
+6) Запусти приложение:
+```
+python3 app.py
+```
+
+### Windows — пошагово
+1) Открой **PowerShell** (Win → введи “PowerShell” → Enter)
+2) Перейди в папку проекта:
+```
+cd "C:\Users\ТВОЁ_ИМЯ\Documents\Cursor\Парсер тг"
+```
+3) Создай виртуальное окружение:
+```
+python -m venv .venv
+```
+4) Активируй окружение:
+```
+.venv\Scripts\Activate.ps1
+```
+5) Если появится ошибка про ExecutionPolicy, выполни:
+```
+Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
+```
+и снова активируй окружение:
+```
+.venv\Scripts\Activate.ps1
+```
+6) Установи зависимости:
+```
+pip install -r requirements.txt
+```
+7) Запусти приложение:
+```
+python app.py
+```
+
 ### Первый запуск без подписи (macOS)
 Если появится предупреждение безопасности:
 1) Открой `Applications` и сделай правый клик по приложению → **Open**
