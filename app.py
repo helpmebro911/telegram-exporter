@@ -19,6 +19,10 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 from telethon.utils import get_display_name, get_peer_id
+try:
+    import keyring
+except Exception:
+    keyring = None
 
 # --- CONFIG & THEME ---
 
@@ -896,25 +900,105 @@ class App(ctk.CTk):
     def has_api_creds(self):
         return bool(self.api_creds.get("api_id") and self.api_creds.get("api_hash"))
 
+    def _keyring_service(self) -> str:
+        return "tg_exporter"
+
+    def _keyring_username(self, api_id: str | None = None) -> str:
+        aid = api_id or self.api_creds.get("api_id")
+        return f"session_{aid}" if aid else "session"
+
+    def _load_session_from_keyring(self) -> str | None:
+        if not keyring:
+            return None
+        try:
+            return keyring.get_password(
+                self._keyring_service(),
+                self._keyring_username(),
+            )
+        except Exception:
+            return None
+
+    def _save_session_to_keyring(self, session_str: str) -> bool:
+        if not keyring or not session_str:
+            return False
+        try:
+            keyring.set_password(
+                self._keyring_service(),
+                self._keyring_username(),
+                session_str,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _clear_session_in_keyring(self, api_id: str | None = None) -> None:
+        if not keyring:
+            return
+        try:
+            username = self._keyring_username(api_id)
+            if keyring.get_password(self._keyring_service(), username):
+                keyring.delete_password(self._keyring_service(), username)
+        except Exception:
+            pass
+
+    def _config_payload(self, include_session: bool = False) -> dict:
+        payload = {}
+        if self.api_creds.get("api_id"):
+            payload["api_id"] = self.api_creds["api_id"]
+        if self.api_creds.get("api_hash"):
+            payload["api_hash"] = self.api_creds["api_hash"]
+        if include_session and self.api_creds.get("session"):
+            payload["session"] = self.api_creds["session"]
+        return payload
+
+    def _secure_config_permissions(self) -> None:
+        if OS_NAME == "Windows":
+            return
+        try:
+            os.chmod(self.config_path, 0o600)
+        except Exception:
+            pass
+
+    def _write_config_file(self, payload: dict) -> None:
+        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
+        with open(self.config_path, "w") as f:
+            json.dump(payload, f)
+        self._secure_config_permissions()
+
     def _load_config_file(self):
         try:
             if os.path.exists(self.config_path):
                 with open(self.config_path, "r") as f:
                     self.api_creds = json.load(f)
+            if not self.api_creds:
+                self.api_creds = {}
+            stored_session = self.api_creds.get("session")
+            if stored_session and keyring:
+                if self._save_session_to_keyring(stored_session):
+                    self.api_creds.pop("session", None)
+                    self._write_config_file(self._config_payload())
+            if not self.api_creds.get("session"):
+                session_str = self._load_session_from_keyring()
+                if session_str:
+                    self.api_creds["session"] = session_str
         except:
             pass
 
     def _load_config(self): return self.api_creds
 
     def save_config(self, api_id, api_hash):
+        old_api_id = self.api_creds.get("api_id")
+        old_api_hash = self.api_creds.get("api_hash")
+        session_str = self.api_creds.get("session")
         self.api_creds = {
             "api_id": api_id,
             "api_hash": api_hash,
-            "session": self.api_creds.get("session"),
+            "session": session_str,
         }
-        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-        with open(self.config_path, "w") as f:
-            json.dump(self.api_creds, f)
+        if old_api_id and (old_api_id != api_id or old_api_hash != api_hash):
+            self.api_creds["session"] = None
+            self._clear_session_in_keyring(old_api_id)
+        self._write_config_file(self._config_payload())
         self.login_view.refresh_state()
 
     def clear_api_creds(self):
@@ -927,15 +1011,18 @@ class App(ctk.CTk):
         self.phone_hash = None
         self.phone_number = None
         self.api_creds = {}
-        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-        with open(self.config_path, "w") as f:
-            json.dump(self.api_creds, f)
+        self._clear_session_in_keyring()
+        self._write_config_file(self.api_creds)
         self.login_view.refresh_state()
 
     def _get_client(self):
         self._ensure_event_loop()
         if not self.client:
             session_str = self.api_creds.get("session")
+            if not session_str:
+                session_str = self._load_session_from_keyring()
+                if session_str:
+                    self.api_creds["session"] = session_str
             session = StringSession(session_str) if session_str else StringSession()
             self.client = TelegramClient(
                 session,
@@ -1349,9 +1436,8 @@ class App(ctk.CTk):
         self.phone_hash = None
         self.phone_number = None
         self.api_creds["session"] = None
-        os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-        with open(self.config_path, "w") as f:
-            json.dump(self.api_creds, f)
+        self._clear_session_in_keyring()
+        self._write_config_file(self._config_payload())
         self.queue.put(("logout_done", None))
 
     def _persist_session(self):
@@ -1360,9 +1446,10 @@ class App(ctk.CTk):
             session_str = c.session.save()
             if session_str:
                 self.api_creds["session"] = session_str
-                os.makedirs(os.path.dirname(self.config_path), exist_ok=True)
-                with open(self.config_path, "w") as f:
-                    json.dump(self.api_creds, f)
+                if not self._save_session_to_keyring(session_str):
+                    self._write_config_file(self._config_payload(include_session=True))
+                else:
+                    self._write_config_file(self._config_payload())
         except Exception:
             pass
 

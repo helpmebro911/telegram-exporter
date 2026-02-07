@@ -2,3 +2,4 @@ telethon
 customtkinter
 faster-whisper
 imageio-ffmpeg
+keyring
