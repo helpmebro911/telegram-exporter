@@ -632,7 +632,6 @@ class ChatListView(ctk.CTkFrame):
         )
         self.cancel_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.cancel_btn.grid_remove()
-        self.progress_frame.pack(anchor="w", padx=20, pady=(0, 12))
         self._set_progress_visible(False)
 
         # List Area (fast listbox)
@@ -818,10 +817,11 @@ class ChatListView(ctk.CTkFrame):
         if visible:
             if not self.progress_row.winfo_ismapped():
                 self.progress_row.pack(fill="x")
+            self.progress_frame.place(in_=self.list_container, relx=0, rely=0, relwidth=1, height=46)
+            self.progress_frame.lift()
             self.cancel_btn.grid()
         else:
-            if self.progress_row.winfo_ismapped():
-                self.progress_row.pack_forget()
+            self.progress_frame.place_forget()
             self.cancel_btn.grid_remove()
             self.progress_chat_label.configure(text="")
             self.progress_label.configure(text="")
