@@ -397,7 +397,7 @@ class LoginView(ctk.CTkFrame):
         super().__init__(master, fg_color="transparent")
         self.app = app
         self._box_relheight_phone = 0.60
-        self._box_relheight_code = 0.72
+        self._box_relheight_code = 0.74
         
         # Center Box
         self.center_box = ctk.CTkFrame(self, fg_color=COLORS["card"], corner_radius=16, border_width=1, border_color=COLORS["border"])
@@ -436,7 +436,8 @@ class LoginView(ctk.CTkFrame):
         self.phone_entry.pack(padx=40, pady=(0, 10), fill="x")
         
         self.action_btn = ModernButton(self.center_box, text="Получить код", command=self._on_action)
-        self.action_btn.pack(padx=40, pady=(10, 0), fill="x")
+        # Give extra bottom padding on high DPI so the button doesn't touch the card border.
+        self.action_btn.pack(padx=40, pady=(10, 16), fill="x")
 
         # Code/Password Input (Initially hidden)
         self.code_entry = ModernEntry(self.center_box, placeholder_text="Код из Telegram")
@@ -456,8 +457,8 @@ class LoginView(ctk.CTkFrame):
         # Increase the relative height a bit for large UI scale and for the code/2FA step.
         scale = self._get_ui_scale()
         base = self._box_relheight_code if self.state == "code" else self._box_relheight_phone
-        extra = max(0.0, min(0.12, (scale - 1.0) * 0.20))
-        relh = min(0.82, base + extra)
+        extra = max(0.0, min(0.16, (scale - 1.0) * 0.25))
+        relh = min(0.88, base + extra)
         try:
             self.center_box.place_configure(relheight=relh)
         except Exception:
