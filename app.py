@@ -903,9 +903,10 @@ class App(ctk.CTk):
     def _keyring_service(self) -> str:
         return "tg_exporter"
 
-    def _keyring_username(self, api_id: str | None = None) -> str:
+    def _keyring_username(self, api_id: str | None = None, kind: str = "session") -> str:
         aid = api_id or self.api_creds.get("api_id")
-        return f"session_{aid}" if aid else "session"
+        suffix = f"_{aid}" if aid else ""
+        return f"{kind}{suffix}"
 
     def _load_session_from_keyring(self) -> str | None:
         if not keyring:
@@ -913,7 +914,7 @@ class App(ctk.CTk):
         try:
             return keyring.get_password(
                 self._keyring_service(),
-                self._keyring_username(),
+                self._keyring_username(kind="session"),
             )
         except Exception:
             return None
@@ -924,7 +925,7 @@ class App(ctk.CTk):
         try:
             keyring.set_password(
                 self._keyring_service(),
-                self._keyring_username(),
+                self._keyring_username(kind="session"),
                 session_str,
             )
             return True
@@ -935,20 +936,50 @@ class App(ctk.CTk):
         if not keyring:
             return
         try:
-            username = self._keyring_username(api_id)
+            username = self._keyring_username(api_id, kind="session")
             if keyring.get_password(self._keyring_service(), username):
                 keyring.delete_password(self._keyring_service(), username)
         except Exception:
             pass
 
-    def _config_payload(self, include_session: bool = False) -> dict:
+    def _load_api_hash_from_keyring(self) -> str | None:
+        if not keyring:
+            return None
+        try:
+            return keyring.get_password(
+                self._keyring_service(),
+                self._keyring_username(kind="api_hash"),
+            )
+        except Exception:
+            return None
+
+    def _save_api_hash_to_keyring(self, api_hash: str) -> bool:
+        if not keyring or not api_hash:
+            return False
+        try:
+            keyring.set_password(
+                self._keyring_service(),
+                self._keyring_username(kind="api_hash"),
+                api_hash,
+            )
+            return True
+        except Exception:
+            return False
+
+    def _clear_api_hash_in_keyring(self, api_id: str | None = None) -> None:
+        if not keyring:
+            return
+        try:
+            username = self._keyring_username(api_id, kind="api_hash")
+            if keyring.get_password(self._keyring_service(), username):
+                keyring.delete_password(self._keyring_service(), username)
+        except Exception:
+            pass
+
+    def _config_payload(self) -> dict:
         payload = {}
         if self.api_creds.get("api_id"):
             payload["api_id"] = self.api_creds["api_id"]
-        if self.api_creds.get("api_hash"):
-            payload["api_hash"] = self.api_creds["api_hash"]
-        if include_session and self.api_creds.get("session"):
-            payload["session"] = self.api_creds["session"]
         return payload
 
     def _secure_config_permissions(self) -> None:
@@ -972,11 +1003,30 @@ class App(ctk.CTk):
                     self.api_creds = json.load(f)
             if not self.api_creds:
                 self.api_creds = {}
-            stored_session = self.api_creds.get("session")
-            if stored_session and keyring:
+
+            stored_session = self.api_creds.pop("session", None)
+            stored_hash = self.api_creds.pop("api_hash", None)
+
+            if stored_hash:
+                if self._save_api_hash_to_keyring(stored_hash):
+                    self.api_creds["api_hash"] = stored_hash
+                else:
+                    self.api_creds["api_hash"] = stored_hash
+
+            if stored_session:
                 if self._save_session_to_keyring(stored_session):
-                    self.api_creds.pop("session", None)
-                    self._write_config_file(self._config_payload())
+                    self.api_creds["session"] = stored_session
+                else:
+                    self.api_creds["session"] = stored_session
+
+            if stored_hash or stored_session:
+                self._write_config_file(self._config_payload())
+
+            if not self.api_creds.get("api_hash"):
+                api_hash = self._load_api_hash_from_keyring()
+                if api_hash:
+                    self.api_creds["api_hash"] = api_hash
+
             if not self.api_creds.get("session"):
                 session_str = self._load_session_from_keyring()
                 if session_str:
@@ -998,6 +1048,9 @@ class App(ctk.CTk):
         if old_api_id and (old_api_id != api_id or old_api_hash != api_hash):
             self.api_creds["session"] = None
             self._clear_session_in_keyring(old_api_id)
+            self._clear_api_hash_in_keyring(old_api_id)
+        if not self._save_api_hash_to_keyring(api_hash):
+            self.api_creds["api_hash"] = api_hash
         self._write_config_file(self._config_payload())
         self.login_view.refresh_state()
 
@@ -1012,6 +1065,7 @@ class App(ctk.CTk):
         self.phone_number = None
         self.api_creds = {}
         self._clear_session_in_keyring()
+        self._clear_api_hash_in_keyring()
         self._write_config_file(self.api_creds)
         self.login_view.refresh_state()
 
@@ -1019,6 +1073,10 @@ class App(ctk.CTk):
         self._ensure_event_loop()
         if not self.client:
             session_str = self.api_creds.get("session")
+            if not self.api_creds.get("api_hash"):
+                api_hash = self._load_api_hash_from_keyring()
+                if api_hash:
+                    self.api_creds["api_hash"] = api_hash
             if not session_str:
                 session_str = self._load_session_from_keyring()
                 if session_str:
@@ -1446,10 +1504,8 @@ class App(ctk.CTk):
             session_str = c.session.save()
             if session_str:
                 self.api_creds["session"] = session_str
-                if not self._save_session_to_keyring(session_str):
-                    self._write_config_file(self._config_payload(include_session=True))
-                else:
-                    self._write_config_file(self._config_payload())
+                self._save_session_to_keyring(session_str)
+                self._write_config_file(self._config_payload())
         except Exception:
             pass
 
