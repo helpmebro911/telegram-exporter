@@ -396,10 +396,12 @@ class LoginView(ctk.CTkFrame):
     def __init__(self, master, app):
         super().__init__(master, fg_color="transparent")
         self.app = app
+        self._box_relheight_phone = 0.60
+        self._box_relheight_code = 0.72
         
         # Center Box
         self.center_box = ctk.CTkFrame(self, fg_color=COLORS["card"], corner_radius=16, border_width=1, border_color=COLORS["border"])
-        self.center_box.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.4, relheight=0.6)
+        self.center_box.place(relx=0.5, rely=0.5, anchor="center", relwidth=0.4, relheight=self._box_relheight_phone)
         
         # Title
         ctk.CTkLabel(
@@ -441,8 +443,28 @@ class LoginView(ctk.CTkFrame):
         self.password_entry = ModernEntry(self.center_box, placeholder_text="Пароль 2FA (если есть)", show="•")
         
         self.state = "phone" # phone -> code -> ready
+        self._adjust_box_height()
+
+    def _get_ui_scale(self) -> float:
+        try:
+            return float(ctk.get_window_scaling())
+        except Exception:
+            return 1.0
+
+    def _adjust_box_height(self) -> None:
+        # Windows DPI scaling can enlarge widgets and cause clipping inside the fixed-height card.
+        # Increase the relative height a bit for large UI scale and for the code/2FA step.
+        scale = self._get_ui_scale()
+        base = self._box_relheight_code if self.state == "code" else self._box_relheight_phone
+        extra = max(0.0, min(0.12, (scale - 1.0) * 0.20))
+        relh = min(0.82, base + extra)
+        try:
+            self.center_box.place_configure(relheight=relh)
+        except Exception:
+            pass
 
     def refresh_state(self):
+        self._adjust_box_height()
         if self.app.has_api_creds():
             self.api_status_lbl.configure(text="API ключи настроены", text_color=COLORS["success"])
             self.settings_btn.configure(text="Изменить API ключи")
@@ -479,6 +501,7 @@ class LoginView(ctk.CTkFrame):
         self.code_entry.pack(padx=40, pady=(10, 0), fill="x", after=self.phone_entry)
         self.password_entry.pack(padx=40, pady=(10, 0), fill="x", after=self.code_entry)
         self.action_btn.configure(text="Войти")
+        self._adjust_box_height()
 
     def _on_clear_api(self):
         ok = messagebox.askyesno(
