@@ -328,6 +328,7 @@ def message_to_export(message) -> dict:
 
 class ModernButton(ctk.CTkButton):
     def __init__(self, master, variant="primary", **kwargs):
+        height = kwargs.pop("height", 38)
         fg_color = COLORS["primary"] if variant == "primary" else "transparent"
         text_color = "#FFFFFF" if variant == "primary" else COLORS["text"]
         hover_color = COLORS["primary_hover"] if variant == "primary" else COLORS["card"]
@@ -343,7 +344,7 @@ class ModernButton(ctk.CTkButton):
             border_width=border_width,
             border_color=border_color,
             font=(FONT_TEXT, 13, "bold" if variant=="primary" else "normal"),
-            height=38,
+            height=height,
             **kwargs
         )
 
