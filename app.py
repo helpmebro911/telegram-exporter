@@ -1169,11 +1169,13 @@ class App(ctk.CTk):
 
     def _transcribe_voice(self, msg, transcriber) -> str | None:
         voice = getattr(msg, "voice", None)
-        if not voice:
+        video_note = getattr(msg, "video_note", None)
+        if not voice and not video_note:
             return None
+        suffix = ".ogg" if voice else ".mp4"
         tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg") as tmp:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
                 tmp_path = tmp.name
             msg.download_media(file=tmp_path)
             segments, _info = transcriber.transcribe(
