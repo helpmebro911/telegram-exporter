@@ -1309,6 +1309,8 @@ class App(ctk.CTk):
             popular_min = self.popular_min_reactions
             popular_entries: list[tuple[str, int]] = []
             popular_written = False
+            debug_popular_count = 0
+            debug_popular_max = 0
             topic_map: dict[str, str] = {}
             service_topic_by_id: dict[int, str] = {}
             has_topics = False
