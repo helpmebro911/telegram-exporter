@@ -607,27 +607,29 @@ class ChatListView(ctk.CTkFrame):
         self.status_lbl.pack(fill="x", padx=20, pady=(0, 8))
 
         # Export progress (top)
-        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent", width=360, height=46)
+        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent", width=360)
         self.progress_frame.pack_propagate(False)
         self.progress_header = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
         self.progress_header.pack(fill="x", padx=2, pady=(0, 6))
         self.progress_header.grid_columnconfigure(0, weight=1)
-        self.progress_header.grid_columnconfigure(1, weight=1)
         self.progress_label = ctk.CTkLabel(self.progress_header, text="", text_color=COLORS["text_sec"])
         self.progress_label.grid(row=0, column=0, sticky="w")
         self.progress_chat_label = ctk.CTkLabel(self.progress_header, text="", text_color=COLORS["text_sec"])
         self.progress_chat_label.grid(row=0, column=1, sticky="e")
+        self.progress_row = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
+        self.progress_row.pack(fill="x")
+        self.progress_bar = ctk.CTkProgressBar(self.progress_row, height=8, corner_radius=6, width=320)
+        self.progress_bar.pack(side="left", anchor="w")
         self.cancel_btn = ModernButton(
-            self.progress_header,
-            text="Отмена",
+            self.progress_row,
+            text="×",
             variant="secondary",
-            width=90,
+            width=28,
+            height=26,
             command=self._on_cancel_export,
         )
-        self.cancel_btn.grid(row=0, column=2, sticky="e", padx=(10, 0))
-        self.cancel_btn.grid_remove()
-        self.progress_bar = ctk.CTkProgressBar(self.progress_frame, height=8, corner_radius=6, width=320)
-        self.progress_bar.pack(anchor="w")
+        self.cancel_btn.pack(side="left", padx=(8, 0))
+        self.cancel_btn.pack_forget()
         self.progress_frame.pack(anchor="w", padx=20, pady=(0, 12))
         self.progress_frame.pack_forget()
 
@@ -779,7 +781,7 @@ class ChatListView(ctk.CTkFrame):
         self.progress_frame.pack(anchor="w", padx=20, pady=(0, 12), before=self.list_container)
         self.progress_chat_label.configure(text=chat_name)
         self.cancel_btn.configure(state="normal")
-        self.cancel_btn.grid()
+        self.cancel_btn.pack(side="left", padx=(8, 0))
         if total:
             self.progress_bar.configure(mode="determinate")
             self.progress_bar.set(0)
@@ -805,7 +807,7 @@ class ChatListView(ctk.CTkFrame):
         self.progress_frame.pack_forget()
         self.progress_chat_label.configure(text="")
         self.progress_label.configure(text="")
-        self.cancel_btn.grid_remove()
+        self.cancel_btn.pack_forget()
         self.status_lbl.configure(text=message if ok else f"Ошибка: {message}")
 
     def _on_cancel_export(self):
