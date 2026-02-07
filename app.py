@@ -1506,7 +1506,7 @@ class App(ctk.CTk):
                             if transcriber is not None:
                                 text = self._transcribe_voice(msg, transcriber)
                                 if text:
-                                    formatted = f"{formatted}\n\n**Транскрипция:** {text}"
+                                    formatted = f"{formatted}\n\nТранскрипция: {text}"
                                 else:
                                     if not transcribe_warned:
                                         transcribe_warned = True
