@@ -1309,8 +1309,6 @@ class App(ctk.CTk):
             popular_min = self.popular_min_reactions
             popular_entries: list[tuple[str, int]] = []
             popular_written = False
-            debug_popular_count = 0
-            debug_popular_max = 0
             topic_map: dict[str, str] = {}
             service_topic_by_id: dict[int, str] = {}
             has_topics = False
@@ -1447,9 +1445,6 @@ class App(ctk.CTk):
                                     continue
                             if total_reactions >= popular_min:
                                 popular_entries.append((rendered, total_reactions))
-                                debug_popular_count += 1
-                                if total_reactions > debug_popular_max:
-                                    debug_popular_max = total_reactions
 
                     count += 1
                     if total and count % 100 == 0:
