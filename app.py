@@ -608,7 +608,7 @@ class ChatListView(ctk.CTkFrame):
         self.status_lbl.pack(fill="x", padx=20, pady=(0, 8))
 
         # Export progress (top)
-        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent", width=360)
+        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent", width=360, height=46)
         self.progress_frame.pack_propagate(False)
         self.progress_header = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
         self.progress_header.pack(fill="x", padx=2, pady=(0, 6))
@@ -633,7 +633,7 @@ class ChatListView(ctk.CTkFrame):
         self.cancel_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
         self.cancel_btn.grid_remove()
         self.progress_frame.pack(anchor="w", padx=20, pady=(0, 12))
-        self.progress_frame.pack_forget()
+        self._set_progress_visible(False)
 
         # List Area (fast listbox)
         self.list_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -780,7 +780,7 @@ class ChatListView(ctk.CTkFrame):
 
     def show_export_progress(self, chat_name: str, total: Optional[int]):
         self._export_total = total
-        self.progress_frame.pack(anchor="w", padx=20, pady=(0, 12), before=self.list_container)
+        self._set_progress_visible(True)
         self.progress_chat_label.configure(text=chat_name)
         self.cancel_btn.configure(state="normal")
         self.cancel_btn.grid()
@@ -806,16 +806,25 @@ class ChatListView(ctk.CTkFrame):
             self.progress_bar.stop()
         except Exception:
             pass
-        self.progress_frame.pack_forget()
-        self.progress_chat_label.configure(text="")
-        self.progress_label.configure(text="")
-        self.cancel_btn.grid_remove()
+        self._set_progress_visible(False)
         self.status_lbl.configure(text=message if ok else f"Ошибка: {message}")
 
     def _on_cancel_export(self):
         self.cancel_btn.configure(state="disabled")
         self.progress_label.configure(text="Отмена...")
         self.app.cancel_export()
+
+    def _set_progress_visible(self, visible: bool):
+        if visible:
+            if not self.progress_row.winfo_ismapped():
+                self.progress_row.pack(fill="x")
+            self.cancel_btn.grid()
+        else:
+            if self.progress_row.winfo_ismapped():
+                self.progress_row.pack_forget()
+            self.cancel_btn.grid_remove()
+            self.progress_chat_label.configure(text="")
+            self.progress_label.configure(text="")
 
 
 class SettingsModal(ctk.CTkToplevel):
