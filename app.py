@@ -814,36 +814,20 @@ class ChatListView(ctk.CTkFrame):
         self.app.cancel_export()
 
     def _set_progress_visible(self, visible: bool):
-        self._progress_visible = bool(visible)
+        visible = bool(visible)
         if visible:
+            # Show progress below the list to avoid shifting the list down
+            if not self.progress_frame.winfo_ismapped():
+                self.progress_frame.pack(fill="x", padx=20, pady=(0, 12), before=self.export_btn)
             if not self.progress_row.winfo_ismapped():
                 self.progress_row.pack(fill="x")
             self.cancel_btn.grid()
-            self._update_progress_overlay_geometry()
-            if not getattr(self, "_progress_overlay_bound", False):
-                self._progress_overlay_bound = True
-                self.list_container.bind("<Configure>", self._update_progress_overlay_geometry)
-                self.bind("<Configure>", self._update_progress_overlay_geometry)
         else:
-            self.progress_frame.place_forget()
+            if self.progress_frame.winfo_ismapped():
+                self.progress_frame.pack_forget()
             self.cancel_btn.grid_remove()
             self.progress_chat_label.configure(text="")
             self.progress_label.configure(text="")
-
-    def _update_progress_overlay_geometry(self, _event=None):
-        if not getattr(self, "_progress_visible", False):
-            return
-        try:
-            x = self.list_container.winfo_x()
-            y = self.list_container.winfo_y()
-            w = self.list_container.winfo_width()
-            if w <= 1:
-                self.after(50, self._update_progress_overlay_geometry)
-                return
-            self.progress_frame.place(x=x, y=y, width=w, height=46)
-            self.progress_frame.lift()
-        except Exception:
-            pass
 
 
 class SettingsModal(ctk.CTkToplevel):
