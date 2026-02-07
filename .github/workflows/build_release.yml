@@ -11,19 +11,30 @@ permissions:
 
 jobs:
   build-macos:
-    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - os: macos-13
+            dmg: TelegramExporter-mac-intel.dmg
+            artifact: telegramexporter-macos-intel
+          - os: macos-14
+            dmg: TelegramExporter-mac-arm64.dmg
+            artifact: telegramexporter-macos-arm64
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
       - name: Build DMG
+        env:
+          DMG_NAME: ${{ matrix.dmg }}
         run: chmod +x ./scripts/build_mac.sh && ./scripts/build_mac.sh
       - name: Upload DMG
         uses: actions/upload-artifact@v4
         with:
-          name: telegramexporter-macos
-          path: dist/TelegramExporter.dmg
+          name: ${{ matrix.artifact }}
+          path: dist/${{ matrix.dmg }}
 
   build-windows:
     runs-on: windows-latest
@@ -56,7 +67,8 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p release
-          cp dist/telegramexporter-macos/TelegramExporter.dmg release/
+          cp dist/telegramexporter-macos-intel/TelegramExporter-mac-intel.dmg release/
+          cp dist/telegramexporter-macos-arm64/TelegramExporter-mac-arm64.dmg release/
           cp dist/telegramexporter-windows/TelegramExporterSetup.exe release/
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v2

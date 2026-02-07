@@ -45,7 +45,8 @@ eval "pyinstaller --windowed --name \"Telegram Exporter\" $ICON_ARG \
   app.py"
 
 APP_PATH="dist/Telegram Exporter.app"
-DMG_PATH="dist/TelegramExporter.dmg"
+DMG_NAME="${DMG_NAME:-TelegramExporter.dmg}"
+DMG_PATH="dist/$DMG_NAME"
 
 rm -f "$DMG_PATH"
 hdiutil create -volname "Telegram Exporter" -srcfolder "$APP_PATH" -ov -format UDZO "$DMG_PATH"
