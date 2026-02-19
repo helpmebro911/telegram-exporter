@@ -527,6 +527,9 @@ class ChatListView(ctk.CTkFrame):
         self._popular_min_var = tk.StringVar(value="5")
         self._analytics_var = tk.BooleanVar(value=False)
         self._transcribe_var = tk.BooleanVar(value=False)
+        self._period_options = ["Все время", "Неделя", "Месяц", "3 месяца", "Год"]
+        self._period_days_map = {"Все время": 0, "Неделя": 7, "Месяц": 30, "3 месяца": 90, "Год": 365}
+        self._period_var = tk.StringVar(value="Все время")
         
         # Header / Toolbar
         self.toolbar = ctk.CTkFrame(self, fg_color="transparent", height=60)
@@ -564,6 +567,19 @@ class ChatListView(ctk.CTkFrame):
             command=self._export_folder,
         )
         self.export_folder_btn.pack(side="left", padx=(10, 0))
+
+        # Period filter
+        self.period_label = ctk.CTkLabel(self.folder_bar, text="Период", text_color=COLORS["text_sec"])
+        self.period_label.pack(side="left", padx=(20, 0))
+        self.period_menu = ctk.CTkOptionMenu(
+            self.folder_bar,
+            values=self._period_options,
+            variable=self._period_var,
+            command=self._on_period_change,
+            width=140,
+            height=32,
+        )
+        self.period_menu.pack(side="left", padx=(10, 0))
 
         # Words per file slider
         self.words_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -766,6 +782,10 @@ class ChatListView(ctk.CTkFrame):
     def _export_folder(self):
         self.app.export_current_folder()
 
+    def _on_period_change(self, value):
+        days = self._period_days_map.get(value, 0)
+        self.app.set_date_period(days)
+
     def _on_transcribe_toggle(self):
         self.app.set_voice_transcribe_enabled(bool(self._transcribe_var.get()))
 
@@ -913,6 +933,7 @@ class App(ctk.CTk):
         self.popular_min_reactions = 5
         self.analytics_enabled = False
         self.voice_transcribe_enabled = False
+        self.date_period_days = 0
         self._whisper_model = None
         self._folder_active = False
         self._folder_queue = []
@@ -1350,6 +1371,9 @@ class App(ctk.CTk):
     def set_voice_transcribe_enabled(self, value: bool):
         self.voice_transcribe_enabled = bool(value)
 
+    def set_date_period(self, days: int):
+        self.date_period_days = max(0, int(days))
+
     def _cleanup_temp_voice_files(self):
         temp_dir = tempfile.gettempdir()
         prefix = "tg_exporter_voice_"
@@ -1706,6 +1730,10 @@ class App(ctk.CTk):
                 md_current = ""
                 md_word_count = 0
 
+            date_cutoff = None
+            if self.date_period_days > 0:
+                date_cutoff = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=self.date_period_days)
+
             total = None
             try:
                 total_list = c.get_messages(dialog, limit=0)
@@ -1714,11 +1742,15 @@ class App(ctk.CTk):
                 total = None
             self.queue.put(("export_start", (dialog.name or "Чат", total)))
 
+            iter_kwargs: dict = {"reverse": True}
+            if date_cutoff is not None:
+                iter_kwargs["offset_date"] = date_cutoff
+
             with open(full_path, "w", encoding="utf-8") as f:
                 f.write('{\n  "name": ' + json.dumps(dialog.name, ensure_ascii=False) + ',\n  "messages": [\n')
                 first = True
                 count = 0
-                for msg in c.iter_messages(dialog, reverse=True):
+                for msg in c.iter_messages(dialog, **iter_kwargs):
                     if self._cancel_export.is_set():
                         raise ExportCancelled()
                     is_out = bool(getattr(msg, "out", False))
