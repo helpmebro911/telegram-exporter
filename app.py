@@ -565,6 +565,7 @@ class ChatListView(ctk.CTkFrame):
         self._popular_min_var = tk.StringVar(value="5")
         self._analytics_var = tk.BooleanVar(value=False)
         self._transcribe_var = tk.BooleanVar(value=False)
+        self._incremental_var = tk.BooleanVar(value=False)
         self._period_options = ["Все время", "Неделя", "Месяц", "3 месяца", "Год", "Свой период"]
         self._period_days_map = {"Все время": 0, "Неделя": 7, "Месяц": 30, "3 месяца": 90, "Год": 365}
         self._period_var = tk.StringVar(value="Все время")
@@ -692,6 +693,29 @@ class ChatListView(ctk.CTkFrame):
             command=self._on_transcribe_toggle,
         )
         self.transcribe_check.pack(side="left")
+
+        # Incremental + Author filter
+        self.incremental_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self.incremental_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.incremental_check = ctk.CTkCheckBox(
+            self.incremental_bar,
+            text="Только новые сообщения",
+            variable=self._incremental_var,
+            command=self._on_incremental_toggle,
+        )
+        self.incremental_check.pack(side="left")
+        self.author_filter_btn = ModernButton(
+            self.incremental_bar,
+            text="Фильтр авторов",
+            variant="secondary",
+            width=160,
+            command=self._on_author_filter,
+        )
+        self.author_filter_btn.pack(side="left", padx=(20, 0))
+        self.author_filter_label = ctk.CTkLabel(
+            self.incremental_bar, text="", text_color=COLORS["text_sec"],
+        )
+        self.author_filter_label.pack(side="left", padx=(10, 0))
 
         # Search
         self.search_entry = ModernEntry(self, placeholder_text="Поиск чатов...")
@@ -869,6 +893,23 @@ class ChatListView(ctk.CTkFrame):
 
     def _on_transcribe_toggle(self):
         self.app.set_voice_transcribe_enabled(bool(self._transcribe_var.get()))
+
+    def _on_incremental_toggle(self):
+        self.app.set_incremental_enabled(bool(self._incremental_var.get()))
+
+    def _on_author_filter(self):
+        dialog = self._get_selected_dialog()
+        if not dialog:
+            self.status_lbl.configure(text="Сначала выберите чат из списка.")
+            return
+        self.status_lbl.configure(text="Загрузка участников...")
+        self.app.load_participants(dialog)
+
+    def update_author_filter_label(self, count: int | None):
+        if count is None:
+            self.author_filter_label.configure(text="")
+        else:
+            self.author_filter_label.configure(text=f"Выбрано: {count}")
 
     def show_folder_progress(self, current, total, label, log_lines=None):
         if not total:
@@ -1074,6 +1115,77 @@ class TopicPickerModal(ctk.CTkToplevel):
         self.destroy()
 
 
+class AuthorFilterModal(ctk.CTkToplevel):
+    def __init__(self, parent, participants: list[dict]):
+        super().__init__(parent)
+        self.title("Фильтр авторов")
+        self.geometry("450x500")
+        self.resizable(False, True)
+        self.transient(parent)
+        self.grab_set()
+
+        self._participants = participants
+        self._vars: list[tk.BooleanVar] = []
+        self.result_ids: set[int] | None = None
+
+        ctk.CTkLabel(
+            self, text="Фильтр авторов",
+            font=(FONT_DISPLAY, 18, "bold"), text_color=COLORS["text"],
+        ).pack(padx=20, pady=(16, 4))
+        ctk.CTkLabel(
+            self, text="Отметьте авторов, чьи сообщения нужно экспортировать",
+            font=(FONT_TEXT, 12), text_color=COLORS["text_sec"],
+        ).pack(padx=20, pady=(0, 12))
+
+        btn_row = ctk.CTkFrame(self, fg_color="transparent")
+        btn_row.pack(fill="x", padx=20, pady=(0, 8))
+        ModernButton(btn_row, text="Выбрать всех", variant="secondary", width=130, command=self._select_all).pack(side="left")
+        ModernButton(btn_row, text="Снять всех", variant="secondary", width=130, command=self._deselect_all).pack(side="left", padx=(8, 0))
+        ModernButton(btn_row, text="Сбросить фильтр", variant="secondary", width=130, command=self._reset_filter).pack(side="left", padx=(8, 0))
+
+        scroll_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
+        scroll_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+        for p in self._participants:
+            var = tk.BooleanVar(value=True)
+            self._vars.append(var)
+            name = p.get("name") or "Без имени"
+            username = p.get("username") or ""
+            label = f"{name} (@{username})" if username else name
+            ctk.CTkCheckBox(scroll_frame, text=label, variable=var).pack(anchor="w", pady=2)
+
+        ModernButton(self, text="Применить", command=self._on_apply).pack(fill="x", padx=20, pady=(0, 16))
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _select_all(self):
+        for v in self._vars:
+            v.set(True)
+
+    def _deselect_all(self):
+        for v in self._vars:
+            v.set(False)
+
+    def _reset_filter(self):
+        self.result_ids = None
+        self.grab_release()
+        self.destroy()
+
+    def _on_apply(self):
+        ids = set()
+        for i, v in enumerate(self._vars):
+            if v.get():
+                pid = self._participants[i].get("id")
+                if pid is not None:
+                    ids.add(pid)
+        self.result_ids = ids if len(ids) < len(self._participants) else None
+        self.grab_release()
+        self.destroy()
+
+    def _on_close(self):
+        self.grab_release()
+        self.destroy()
+
+
 # --- MAIN APP CONTROLLER ---
 
 class App(ctk.CTk):
@@ -1103,6 +1215,9 @@ class App(ctk.CTk):
         self.date_period_days = 0
         self.custom_date_from = None
         self.custom_date_to = None
+        self.incremental_enabled = False
+        self.author_filter_ids: set[int] | None = None
+        self._export_history_path = os.path.expanduser("~/.tg_exporter/export_history.json")
         self._whisper_model = None
         self._folder_active = False
         self._folder_queue = []
@@ -1555,6 +1670,64 @@ class App(ctk.CTk):
         self.custom_date_from = date_from
         self.custom_date_to = date_to
 
+    def set_incremental_enabled(self, value: bool):
+        self.incremental_enabled = bool(value)
+
+    def _load_export_history(self) -> dict:
+        try:
+            if os.path.exists(self._export_history_path):
+                with open(self._export_history_path, "r") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_export_history(self, peer_id: int, last_msg_id: int):
+        history = self._load_export_history()
+        history[str(peer_id)] = {
+            "last_msg_id": last_msg_id,
+            "last_export": datetime.datetime.now().isoformat(),
+        }
+        try:
+            os.makedirs(os.path.dirname(self._export_history_path), exist_ok=True)
+            with open(self._export_history_path, "w") as f:
+                json.dump(history, f, indent=2)
+        except Exception:
+            pass
+
+    def _get_last_export_id(self, dialog) -> int | None:
+        try:
+            pid = str(get_peer_id(dialog.entity))
+            history = self._load_export_history()
+            entry = history.get(pid)
+            if entry and isinstance(entry.get("last_msg_id"), int):
+                return entry["last_msg_id"]
+        except Exception:
+            pass
+        return None
+
+    def load_participants(self, dialog):
+        self._run_bg(self._load_participants_task, dialog)
+
+    def _load_participants_task(self, dialog):
+        try:
+            c = self._get_client()
+            participants = []
+            seen = set()
+            for user in c.iter_participants(dialog, limit=500):
+                uid = user.id
+                if uid in seen:
+                    continue
+                seen.add(uid)
+                name = get_display_name(user) or ""
+                username = getattr(user, "username", None) or ""
+                participants.append({"id": uid, "name": name, "username": username})
+            participants.sort(key=lambda x: (x.get("name") or "").lower())
+            self.queue.put(("participants_loaded", participants))
+        except Exception as e:
+            self.queue.put(("participants_loaded", []))
+            self.queue.put(("info", f"Не удалось загрузить участников: {e}"))
+
     def _cleanup_temp_voice_files(self):
         temp_dir = tempfile.gettempdir()
         prefix = "tg_exporter_voice_"
@@ -1951,9 +2124,17 @@ class App(ctk.CTk):
             elif self.date_period_days > 0:
                 date_from = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=self.date_period_days)
 
+            incremental_min_id = None
+            if self.incremental_enabled:
+                incremental_min_id = self._get_last_export_id(dialog)
+            max_msg_id = 0
+            author_filter = self.author_filter_ids
+
             count_kwargs: dict = {"limit": 0}
             if topic_id is not None:
                 count_kwargs["reply_to"] = topic_id
+            if incremental_min_id:
+                count_kwargs["min_id"] = incremental_min_id
 
             total = None
             try:
@@ -1983,6 +2164,8 @@ class App(ctk.CTk):
                 iter_kwargs["reply_to"] = topic_id
             if date_from is not None:
                 iter_kwargs["offset_date"] = date_from
+            if incremental_min_id:
+                iter_kwargs["min_id"] = incremental_min_id
 
             with open(full_path, "w", encoding="utf-8") as f:
                 json_header = '{\n  "name": ' + json.dumps(dialog.name, ensure_ascii=False)
@@ -1998,6 +2181,16 @@ class App(ctk.CTk):
                         raise ExportCancelled()
                     if date_to_end and hasattr(msg, "date") and msg.date and msg.date >= date_to_end:
                         break
+                    msg_id = getattr(msg, "id", 0) or 0
+                    if msg_id > max_msg_id:
+                        max_msg_id = msg_id
+                    if author_filter is not None:
+                        sender_id = getattr(msg, "sender_id", None)
+                        if sender_id is not None and sender_id not in author_filter:
+                            count += 1
+                            if total and count % 200 == 0:
+                                self.queue.put(("export_progress", (count, total)))
+                            continue
                     is_out = bool(getattr(msg, "out", False))
                     if not first: f.write(",\n")
                     first = False
@@ -2242,6 +2435,12 @@ class App(ctk.CTk):
                         af.write(with_bom)
                     analytics_written.append("activity.md")
 
+            if max_msg_id > 0:
+                try:
+                    peer_id = get_peer_id(dialog.entity)
+                    self._save_export_history(peer_id, max_msg_id)
+                except Exception:
+                    pass
             if total:
                 self.queue.put(("export_progress", (total, total)))
             done_msg = f"Готово: {export_dir}"
@@ -2334,6 +2533,18 @@ class App(ctk.CTk):
                             self._start_export(dialog, picker.result_topic_id, picker.result_topic_title)
                     else:
                         self._start_export(dialog)
+                elif kind == "participants_loaded":
+                    self.chats_view.status_lbl.configure(text="")
+                    if data:
+                        modal = AuthorFilterModal(self, data)
+                        self.wait_window(modal)
+                        self.author_filter_ids = modal.result_ids
+                        if modal.result_ids is not None:
+                            self.chats_view.update_author_filter_label(len(modal.result_ids))
+                        else:
+                            self.chats_view.update_author_filter_label(None)
+                    else:
+                        self.chats_view.status_lbl.configure(text="Не удалось загрузить участников")
                 elif kind == "logout_done": self.show_login()
         except queue.Empty: pass
         self.after(100, self._process_queue)
