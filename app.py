@@ -1164,24 +1164,16 @@ class App(ctk.CTk):
         self._cancel_export.clear()
         if not self._confirm_export_safety():
             return
-        topic_id = None
-        topic_title = None
         if self._is_forum(dialog):
             self.chats_view.status_lbl.configure(text="Загрузка тем...")
-            topics = self._load_topics(dialog)
-            self.chats_view.status_lbl.configure(text="")
-            if topics:
-                picker = TopicPickerModal(self, topics)
-                self.wait_window(picker)
-                if picker.result_export_all:
-                    pass
-                elif picker.result_topic_id is not None:
-                    topic_id = picker.result_topic_id
-                    topic_title = picker.result_topic_title
-                else:
-                    return
+            self._run_bg(self._load_topics_task, dialog)
+        else:
+            self._start_export(dialog)
+
+    def _start_export(self, dialog, topic_id=None, topic_title=None):
         path = filedialog.askdirectory(title="Куда сохранить экспорт?")
-        if not path: return
+        if not path:
+            return
         self._folder_active = False
         self.chats_view.status_lbl.configure(text="")
         self._run_bg(self._export_task, dialog, path, topic_id, topic_title)
@@ -1599,7 +1591,7 @@ class App(ctk.CTk):
         entity = getattr(dialog, "entity", None)
         return bool(getattr(entity, "forum", False)) if entity else False
 
-    def _load_topics(self, dialog) -> list[dict]:
+    def _load_topics_task(self, dialog):
         try:
             c = self._get_client()
             entity = getattr(dialog, "input_entity", None) or getattr(dialog, "entity", None) or dialog
@@ -1617,10 +1609,10 @@ class App(ctk.CTk):
                 if topic_id is not None and title:
                     topics.append({"id": topic_id, "title": title})
             topics.sort(key=lambda x: x["title"].lower())
-            return topics
+            self.queue.put(("topics_loaded", (dialog, topics)))
         except Exception as e:
+            self.queue.put(("topics_loaded", (dialog, [])))
             self.queue.put(("info", f"Не удалось загрузить темы: {e}"))
-            return []
 
     def _ensure_ffmpeg(self) -> bool:
         try:
@@ -2330,6 +2322,18 @@ class App(ctk.CTk):
                     self.chats_view.show_folder_progress(current, total, label, self._folder_log)
                 elif kind == "folder_done":
                     self.chats_view.show_folder_done(data, self._folder_log)
+                elif kind == "topics_loaded":
+                    dialog, topics = data
+                    self.chats_view.status_lbl.configure(text="")
+                    if topics:
+                        picker = TopicPickerModal(self, topics)
+                        self.wait_window(picker)
+                        if picker.result_export_all:
+                            self._start_export(dialog)
+                        elif picker.result_topic_id is not None:
+                            self._start_export(dialog, picker.result_topic_id, picker.result_topic_title)
+                    else:
+                        self._start_export(dialog)
                 elif kind == "logout_done": self.show_login()
         except queue.Empty: pass
         self.after(100, self._process_queue)
