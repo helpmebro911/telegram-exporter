@@ -1602,9 +1602,10 @@ class App(ctk.CTk):
     def _load_topics(self, dialog) -> list[dict]:
         try:
             c = self._get_client()
-            result = c(functions.channels.GetForumTopicsRequest(
-                channel=dialog,
-                offset_date=0,
+            entity = getattr(dialog, "input_entity", None) or getattr(dialog, "entity", None) or dialog
+            result = c(functions.messages.GetForumTopicsRequest(
+                peer=entity,
+                offset_date=datetime.datetime.now(datetime.timezone.utc),
                 offset_id=0,
                 offset_topic=0,
                 limit=100,
@@ -1613,12 +1614,12 @@ class App(ctk.CTk):
             for t in getattr(result, "topics", []):
                 topic_id = getattr(t, "id", None)
                 title = normalize_text(getattr(t, "title", None))
-                count = getattr(t, "top_message", None)
                 if topic_id is not None and title:
-                    topics.append({"id": topic_id, "title": title, "count": count})
+                    topics.append({"id": topic_id, "title": title})
             topics.sort(key=lambda x: x["title"].lower())
             return topics
-        except Exception:
+        except Exception as e:
+            self.queue.put(("info", f"Не удалось загрузить темы: {e}"))
             return []
 
     def _ensure_ffmpeg(self) -> bool:
