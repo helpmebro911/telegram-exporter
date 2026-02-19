@@ -1736,8 +1736,12 @@ class App(ctk.CTk):
 
             total = None
             try:
-                total_list = c.get_messages(dialog, limit=0)
-                total = getattr(total_list, "total", None)
+                total_all = getattr(c.get_messages(dialog, limit=0), "total", None)
+                if date_cutoff is not None and total_all:
+                    before_cutoff = getattr(c.get_messages(dialog, limit=0, offset_date=date_cutoff), "total", 0) or 0
+                    total = max(0, total_all - before_cutoff)
+                else:
+                    total = total_all
             except Exception:
                 total = None
             self.queue.put(("export_start", (dialog.name or "Чат", total)))
