@@ -217,6 +217,20 @@ def _format_markdown_message(msg: dict) -> str:
     body = _process_text(msg.get("text", ""), MARKDOWN_SETTINGS["plain_text"])
 
     extras: list[str] = []
+    if msg.get("links"):
+        link_lines = []
+        for link in msg["links"]:
+            url = link.get("url", "")
+            label = link.get("text", "")
+            if label and label != url:
+                link_lines.append(f"[{label}]({url})")
+            else:
+                link_lines.append(url)
+        if link_lines:
+            all_in_body = all(l.get("url", "") in body for l in msg["links"] if not l.get("text"))
+            has_text_links = any(l.get("text") for l in msg["links"])
+            if has_text_links or not all_in_body:
+                extras.append("🔗 " + " | ".join(link_lines))
     if MARKDOWN_SETTINGS["include_polls"] and msg.get("poll"):
         extras.append(_format_poll(msg.get("poll") or {}))
     if MARKDOWN_SETTINGS["include_reactions"] and msg.get("reactions"):
@@ -283,6 +297,27 @@ def build_poll(message) -> dict | None:
         poll_data["total_voters"] = results.total_voters
     return poll_data
 
+def _extract_links(message) -> list[dict] | None:
+    entities = getattr(message, "entities", None) or []
+    raw = getattr(message, "raw_text", "") or ""
+    links: list[dict] = []
+    seen: set[str] = set()
+    for ent in entities:
+        cls_name = type(ent).__name__
+        if cls_name == "MessageEntityTextUrl":
+            url = getattr(ent, "url", None)
+            if url and url not in seen:
+                label = raw[ent.offset:ent.offset + ent.length] if ent.offset + ent.length <= len(raw) else ""
+                links.append({"url": url, "text": label} if label and label != url else {"url": url})
+                seen.add(url)
+        elif cls_name == "MessageEntityUrl":
+            url = raw[ent.offset:ent.offset + ent.length] if ent.offset + ent.length <= len(raw) else ""
+            if url and url not in seen:
+                links.append({"url": url})
+                seen.add(url)
+    return links or None
+
+
 def message_to_export(message) -> dict:
     msg_type = "service" if message.action else "message"
     sender = None
@@ -303,6 +338,9 @@ def message_to_export(message) -> dict:
         "from_id": message.sender_id,
         "text": normalize_text(msg_text),
     }
+    links = _extract_links(message)
+    if links:
+        msg["links"] = links
 
     if message.reply_to_msg_id: msg["reply_to_message_id"] = message.reply_to_msg_id
     reply_to = getattr(message, "reply_to", None)
