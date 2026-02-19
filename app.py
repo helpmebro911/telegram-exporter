@@ -591,7 +591,7 @@ class ChatListView(ctk.CTkFrame):
         ctk.CTkLabel(self.date_range_bar, text="До", text_color=COLORS["text_sec"]).pack(side="left", padx=(14, 0))
         self.date_to_entry = ModernEntry(self.date_range_bar, placeholder_text="ГГГГ-ММ-ДД", width=130, textvariable=self._date_to_var)
         self.date_to_entry.pack(side="left", padx=(6, 0))
-        self.date_range_hint = ctk.CTkLabel(self.date_range_bar, text="UTC", text_color=COLORS["text_sec"])
+        self.date_range_hint = ctk.CTkLabel(self.date_range_bar, text="UTC (напр. 2025-01-15)", text_color=COLORS["text_sec"])
         self.date_range_hint.pack(side="left", padx=(10, 0))
         self.date_from_entry.bind("<FocusOut>", self._apply_custom_dates)
         self.date_to_entry.bind("<FocusOut>", self._apply_custom_dates)
@@ -1953,38 +1953,69 @@ class App(ctk.CTk):
             if analytics_enabled:
                 if author_counts:
                     sorted_authors = sorted(author_counts.items(), key=lambda x: x[1], reverse=True)
-                    lines = [
+                    summary_lines = [
                         f"# Топ активных участников ({len(sorted_authors)})",
                         "",
                         f"Сформировано: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M')}",
                         "",
+                        "## Список участников",
+                        "",
                     ]
-                    lines.append("## Список участников")
-                    lines.append("")
                     for author_id, count_messages in sorted_authors:
                         meta = author_meta.get(author_id, {})
                         name = meta.get("name") or "Без имени"
                         username = meta.get("username") or ""
                         display = f"{name} (@{username})" if username else name
-                        lines.append(f"- {display} — {count_messages}")
-                    lines.append("")
+                        summary_lines.append(f"- {display} — {count_messages}")
+                    summary_lines.append("")
+
+                    author_blocks: list[tuple[str, int]] = []
                     for author_id, count_messages in sorted_authors:
                         meta = author_meta.get(author_id, {})
                         name = meta.get("name") or "Без имени"
                         username = meta.get("username") or ""
                         display = f"{name} (@{username})" if username else name
-                        lines.append(f"## {display} — {count_messages}")
-                        lines.append("")
+                        block_lines = [f"## {display} — {count_messages}", ""]
                         for entry in author_messages.get(author_id, []):
                             if entry:
-                                lines.append(entry)
-                                lines.append("")
-                    top_path = os.path.join(export_dir, "top_authors.md")
-                    normalized = "\n".join(lines).replace("\r\n", "\n").replace("\r", "\n")
-                    with_bom = "\ufeff" + normalized.strip() + "\n"
-                    with open(top_path, "w", encoding="utf-8") as tf:
-                        tf.write(with_bom)
-                    analytics_written.append("top_authors.md")
+                                block_lines.append(entry)
+                                block_lines.append("")
+                        block_text = "\n".join(block_lines)
+                        block_words = len(block_text.split())
+                        author_blocks.append((block_text, block_words))
+
+                    words_limit = md_words_per_file
+                    summary_text = "\n".join(summary_lines)
+                    parts: list[str] = []
+                    current_part = summary_text
+                    current_words = len(summary_text.split())
+
+                    for block_text, block_words in author_blocks:
+                        if current_words + block_words > words_limit and current_part.strip() != summary_text.strip():
+                            parts.append(current_part)
+                            current_part = ""
+                            current_words = 0
+                        if current_part:
+                            current_part += "\n" + block_text
+                        else:
+                            current_part = block_text
+                        current_words += block_words
+                    if current_part.strip():
+                        parts.append(current_part)
+
+                    ta_written = 0
+                    for idx, part_content in enumerate(parts):
+                        suffix = "" if idx == 0 else f"_part_{idx + 1}"
+                        fname = f"top_authors{suffix}.md"
+                        fpath = os.path.join(export_dir, fname)
+                        normalized = part_content.replace("\r\n", "\n").replace("\r", "\n").strip() + "\n"
+                        with open(fpath, "w", encoding="utf-8") as tf:
+                            tf.write("\ufeff" + normalized)
+                        ta_written += 1
+                    if ta_written == 1:
+                        analytics_written.append("top_authors.md")
+                    else:
+                        analytics_written.append(f"top_authors (×{ta_written})")
 
                 if activity_counts:
                     weekday_names = [
