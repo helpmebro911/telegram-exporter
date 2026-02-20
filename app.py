@@ -4,11 +4,17 @@ import json
 import os
 import queue
 import re
+import socket
 import threading
 import tkinter as tk
+import subprocess
 import tempfile
+import time
 import platform
 import traceback
+import urllib.request
+import urllib.error
+import urllib.parse
 from pathlib import Path
 from tkinter import filedialog, messagebox
 from typing import Optional
@@ -23,6 +29,10 @@ from telethon.errors import SessionPasswordNeededError
 from telethon.sessions import StringSession
 from telethon.sync import TelegramClient
 from telethon.utils import get_display_name, get_peer_id
+try:
+    import socks
+except ImportError:
+    socks = None
 try:
     import keyring
 except Exception:
@@ -236,6 +246,14 @@ def _format_markdown_message(msg: dict) -> str:
     if MARKDOWN_SETTINGS["include_reactions"] and msg.get("reactions"):
         extras.append(_format_reactions(msg.get("reactions") or []))
 
+    if msg.get("views") is not None or msg.get("forwards") is not None:
+        stats = []
+        if msg.get("views") is not None:
+            stats.append(f"👁 {msg['views']}")
+        if msg.get("forwards") is not None:
+            stats.append(f"↗ {msg['forwards']}")
+        extras.append(" | ".join(stats))
+
     if MARKDOWN_SETTINGS["include_forwarded"] and msg.get("forwarded_from"):
         body = f"> Переслано от {msg['forwarded_from']}\n{body}"
 
@@ -341,6 +359,13 @@ def message_to_export(message) -> dict:
     links = _extract_links(message)
     if links:
         msg["links"] = links
+
+    views = getattr(message, "views", None)
+    if views is not None:
+        msg["views"] = views
+    forwards = getattr(message, "forwards", None)
+    if forwards is not None:
+        msg["forwards"] = forwards
 
     if message.reply_to_msg_id: msg["reply_to_message_id"] = message.reply_to_msg_id
     reply_to = getattr(message, "reply_to", None)
@@ -565,6 +590,7 @@ class ChatListView(ctk.CTkFrame):
         self._popular_min_var = tk.StringVar(value="5")
         self._analytics_var = tk.BooleanVar(value=False)
         self._transcribe_var = tk.BooleanVar(value=False)
+        self._views_var = tk.BooleanVar(value=False)
         self._incremental_var = tk.BooleanVar(value=False)
         self._period_options = ["Все время", "Неделя", "Месяц", "3 месяца", "Год", "Свой период"]
         self._period_days_map = {"Все время": 0, "Неделя": 7, "Месяц": 30, "3 месяца": 90, "Год": 365}
@@ -582,7 +608,7 @@ class ChatListView(ctk.CTkFrame):
         self.logout_btn.pack(side="right", padx=(10, 0))
         
         self.refresh_btn = ModernButton(self.toolbar, text="Обновить", variant="secondary", width=110, command=self.app.load_chats)
-        self.refresh_btn.pack(side="right")
+        self.refresh_btn.pack(side="right", padx=(0, 24))
 
         # Folders
         self.folder_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -685,14 +711,127 @@ class ChatListView(ctk.CTkFrame):
         self.analytics_check.pack(side="left")
 
         self.transcribe_bar = ctk.CTkFrame(self, fg_color="transparent")
-        self.transcribe_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.transcribe_bar.pack(fill="x", padx=20, pady=(0, 4))
         self.transcribe_check = ctk.CTkCheckBox(
             self.transcribe_bar,
-            text="Транскрибация голосовых (каналы)",
+            text="Транскрипция голосовых и видео (каналы)",
             variable=self._transcribe_var,
             command=self._on_transcribe_toggle,
         )
         self.transcribe_check.pack(side="left")
+
+        # Провайдер: Локальная | Deepgram
+        self.transcribe_provider_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self.transcribe_provider_bar.pack(fill="x", padx=20, pady=(2, 2))
+        ctk.CTkLabel(self.transcribe_provider_bar, text="Провайдер:", font=(FONT_TEXT, 12), text_color=COLORS["text_sec"]).pack(side="left")
+        _pv = self.app.transcription_provider or "local"
+        self._transcription_provider_var = tk.StringVar(
+            value="Deepgram (облако)" if _pv == "deepgram" else "Локальная (Whisper / Silero / Parakeet)"
+        )
+        self.transcription_provider_menu = ctk.CTkOptionMenu(
+            self.transcribe_provider_bar,
+            values=["Локальная (Whisper / Silero / Parakeet)", "Deepgram (облако)"],
+            variable=self._transcription_provider_var,
+            width=280,
+            height=28,
+            command=self._on_transcription_provider_change,
+        )
+        self.transcription_provider_menu.pack(side="left", padx=(6, 12))
+
+        # Локальная транскрипция: Whisper, Parakeet (NeMo), Silero
+        self._LOCAL_WHISPER_MODELS = [
+            ("tiny — ~39M, ~1 GB RAM, быстро (Whisper)", "tiny"),
+            ("base — ~74M, ~1 GB RAM, быстро (Whisper)", "base"),
+            ("small — ~244M, ~2 GB RAM (Whisper)", "small"),
+            ("medium — ~769M, ~5 GB RAM (Whisper)", "medium"),
+            ("large-v2 — ~1.5B, ~10 GB. Старшая версия, долго (Whisper)", "large-v2"),
+            ("large-v3 — ~1.5B, ~10 GB. Новее и точнее v2, долго (Whisper)", "large-v3"),
+            ("Parakeet-TDT 0.6B — NeMo, англ. (NVIDIA)", "parakeet-tdt-0.6b"),
+            ("Parakeet-TDT 1.1B — NeMo, англ., точнее (NVIDIA)", "parakeet-tdt-1.1b"),
+            ("Silero STT (рус.) — лёгкая, RU", "silero-ru"),
+            ("Silero STT (англ.) — лёгкая, EN", "silero-en"),
+        ]
+        self._LOCAL_WHISPER_LARGE_IDS = {"large-v2", "large-v3"}
+        self.transcribe_bar2 = ctk.CTkFrame(self, fg_color="transparent")
+        self.transcribe_bar2.pack(fill="x", padx=20, pady=(0, 12))
+        # Блок для локальной модели
+        self.transcribe_local_frame = ctk.CTkFrame(self.transcribe_bar2, fg_color="transparent")
+        ctk.CTkLabel(self.transcribe_local_frame, text="Модель:", font=(FONT_TEXT, 12), text_color=COLORS["text_sec"]).pack(side="left")
+        _def_display = next((d for d, m in self._LOCAL_WHISPER_MODELS if m == (self.app.local_whisper_model or "base")), None)
+        self._local_whisper_model_var = tk.StringVar(value=_def_display or self._LOCAL_WHISPER_MODELS[1][0])
+        self.local_whisper_model_menu = ctk.CTkOptionMenu(
+            self.transcribe_local_frame,
+            values=[d for d, _ in self._LOCAL_WHISPER_MODELS],
+            variable=self._local_whisper_model_var,
+            width=420,
+            height=28,
+            command=self._on_local_whisper_model_change,
+        )
+        self.local_whisper_model_menu.pack(side="left", padx=(6, 12))
+        self.local_whisper_warning_lbl = ctk.CTkLabel(
+            self.transcribe_local_frame,
+            text="",
+            font=(FONT_TEXT, 11),
+            text_color="#e67e22",
+        )
+        self.local_whisper_warning_lbl.pack(side="left")
+        # Блок для Deepgram API ключа (показывается при выборе Deepgram)
+        self.transcribe_deepgram_frame = ctk.CTkFrame(self.transcribe_bar2, fg_color="transparent")
+        # Режим ввода: поле + Сохранить
+        self.deepgram_edit_frame = ctk.CTkFrame(self.transcribe_deepgram_frame, fg_color="transparent")
+        ctk.CTkLabel(self.deepgram_edit_frame, text="API ключ:", font=(FONT_TEXT, 12), text_color=COLORS["text_sec"]).pack(side="left")
+        self.deepgram_api_entry = ModernEntry(
+            self.deepgram_edit_frame,
+            placeholder_text="Deepgram API Key",
+            width=180,
+            show="•",
+        )
+        self.deepgram_api_entry.pack(side="left", padx=(6, 8))
+        self.deepgram_save_btn = ModernButton(
+            self.deepgram_edit_frame,
+            text="Сохранить",
+            variant="secondary",
+            width=90,
+            command=self._on_deepgram_save,
+        )
+        self.deepgram_save_btn.pack(side="left")
+        # Режим "сохранено": текст + Изменить
+        self.deepgram_saved_frame = ctk.CTkFrame(self.transcribe_deepgram_frame, fg_color="transparent")
+        self.deepgram_saved_lbl = ctk.CTkLabel(
+            self.deepgram_saved_frame,
+            text="API ключ сохранён",
+            font=(FONT_TEXT, 12),
+            text_color=COLORS["success"],
+        )
+        self.deepgram_saved_lbl.pack(side="left")
+        self.deepgram_edit_btn = ModernButton(
+            self.deepgram_saved_frame,
+            text="Изменить",
+            variant="secondary",
+            width=90,
+            command=self._on_deepgram_show_edit,
+        )
+        self.deepgram_edit_btn.pack(side="left", padx=(12, 0))
+        self._update_large_model_warning()
+        self._update_transcribe_provider_visibility()
+
+        self.views_bar = ctk.CTkFrame(self, fg_color="transparent")
+        self.views_bar.pack(fill="x", padx=20, pady=(0, 12))
+        self.views_check = ctk.CTkCheckBox(
+            self.views_bar,
+            text="Просмотры и пересылки (каналы)",
+            variable=self._views_var,
+            command=self._on_views_toggle,
+        )
+        self.views_check.pack(side="left")
+        self._download_media_var = tk.BooleanVar(value=self.app.download_media_enabled)
+        self.download_media_check = ctk.CTkCheckBox(
+            self.views_bar,
+            text="Скачивать медиа в папку (видео, фото, голосовые и т.д.)",
+            variable=self._download_media_var,
+            command=self._on_download_media_toggle,
+        )
+        self.download_media_check.pack(side="left", padx=(20, 0))
 
         # Incremental + Author filter
         self.incremental_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -716,43 +855,46 @@ class ChatListView(ctk.CTkFrame):
             self.incremental_bar, text="", text_color=COLORS["text_sec"],
         )
         self.author_filter_label.pack(side="left", padx=(10, 0))
+        self.fav_btn = ModernButton(
+            self.incremental_bar, text="★ Избранные", variant="secondary",
+            width=140, command=self._on_favorites,
+        )
+        self.fav_btn.pack(side="left", padx=(8, 0))
+        self.fav_count_label = ctk.CTkLabel(
+            self.incremental_bar, text="", text_color=COLORS["text_sec"],
+        )
+        self.fav_count_label.pack(side="left", padx=(4, 0))
+        self._update_fav_count()
 
         # Search
         self.search_entry = ModernEntry(self, placeholder_text="Поиск чатов...")
         self.search_entry.pack(fill="x", padx=20, pady=(0, 15))
         self.search_entry.bind("<KeyRelease>", self._on_search)
 
-        # Status
-        self.status_lbl = ctk.CTkLabel(self, text="", text_color=COLORS["text_sec"])
-        self.status_lbl.pack(fill="x", padx=20, pady=(0, 8))
-
-        # Export progress (top, reliable on macOS)
-        # Height must fit header + progress row; otherwise widgets overflow and overlap the list (Tk doesn't clip children).
-        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent", width=360, height=70)
+        # Прогресс экспорта — компактная строка сразу под поиском
+        self.progress_frame = ctk.CTkFrame(self, fg_color="transparent", height=36)
         self.progress_frame.pack_propagate(False)
-        self.progress_header = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
-        self.progress_header.pack(fill="x", padx=2, pady=(0, 6))
-        self.progress_header.grid_columnconfigure(0, weight=1)
-        self.progress_label = ctk.CTkLabel(self.progress_header, text="", text_color=COLORS["text_sec"])
-        self.progress_label.grid(row=0, column=0, sticky="w")
-        self.progress_chat_label = ctk.CTkLabel(self.progress_header, text="", text_color=COLORS["text_sec"])
-        self.progress_chat_label.grid(row=0, column=1, sticky="e")
-        self.progress_row = ctk.CTkFrame(self.progress_frame, fg_color="transparent")
-        self.progress_row.pack(fill="x")
-        self.progress_row.grid_columnconfigure(0, weight=1)
-        self.progress_bar = ctk.CTkProgressBar(self.progress_row, height=8, corner_radius=6, width=320)
-        self.progress_bar.grid(row=0, column=0, sticky="w")
+        self.progress_frame.grid_columnconfigure(3, weight=1)  # название чата забирает оставшееся место
+        self.progress_label = ctk.CTkLabel(self.progress_frame, text="", font=(FONT_TEXT, 11), text_color=COLORS["text_sec"])
+        self.progress_label.grid(row=0, column=0, sticky="w", padx=(20, 6))
+        self.progress_bar = ctk.CTkProgressBar(self.progress_frame, height=6, corner_radius=3, width=90)
+        self.progress_bar.grid(row=0, column=1, sticky="w", padx=4)
         self.cancel_btn = ModernButton(
-            self.progress_row,
+            self.progress_frame,
             text="×",
             variant="secondary",
             width=28,
-            height=26,
+            height=24,
             command=self._on_cancel_export,
         )
-        self.cancel_btn.grid(row=0, column=1, sticky="e", padx=(8, 0))
-        self.cancel_btn.grid_remove()
+        self.cancel_btn.grid(row=0, column=2, sticky="e", padx=(4, 20))
+        self.progress_chat_label = ctk.CTkLabel(self.progress_frame, text="", font=(FONT_TEXT, 11), text_color=COLORS["text_sec"], anchor="e")
+        self.progress_chat_label.grid(row=0, column=3, sticky="ew", padx=(0, 20))
         self.progress_frame.pack_forget()
+
+        # Status
+        self.status_lbl = ctk.CTkLabel(self, text="", text_color=COLORS["text_sec"])
+        self.status_lbl.pack(fill="x", padx=20, pady=(0, 8))
 
         # List Area (fast listbox)
         self.list_container = ctk.CTkFrame(self, fg_color="transparent")
@@ -891,8 +1033,87 @@ class ChatListView(ctk.CTkFrame):
                 continue
         return None
 
+    def _update_large_model_warning(self):
+        model_id = next((m for d, m in self._LOCAL_WHISPER_MODELS if d == self._local_whisper_model_var.get()), "base")
+        if model_id in self._LOCAL_WHISPER_LARGE_IDS:
+            self.local_whisper_warning_lbl.configure(
+                text="Внимание: большая модель. Транскрипция займёт много времени и создаст нагрузку на систему."
+            )
+        else:
+            self.local_whisper_warning_lbl.configure(text="")
+
+    def _on_local_whisper_model_change(self, value: str):
+        model_id = next((m for d, m in self._LOCAL_WHISPER_MODELS if d == value), "base")
+        self.app.set_local_whisper_model(model_id)
+        self._update_large_model_warning()
+
+    def _on_transcription_provider_change(self, value: str):
+        provider = "deepgram" if "Deepgram" in value else "local"
+        self.app.set_transcription_provider(provider)
+        try:
+            self.app._write_config_file(self.app._config_payload())
+        except Exception:
+            pass
+        self._update_transcribe_provider_visibility()
+
+    def _update_transcribe_provider_visibility(self):
+        is_local = (self.app.transcription_provider or "local") == "local"
+        if is_local:
+            self.transcribe_deepgram_frame.pack_forget()
+            self.transcribe_local_frame.pack(side="left", fill="x", expand=True)
+        else:
+            self.transcribe_local_frame.pack_forget()
+            self.transcribe_deepgram_frame.pack(side="left", fill="x", expand=True)
+            self._update_deepgram_saved_state()
+
+    def _update_deepgram_saved_state(self):
+        """Показать поле ввода или блок «API ключ сохранён» в зависимости от наличия ключа."""
+        has_key = bool((self.app.deepgram_api_key or "").strip())
+        if has_key:
+            self.deepgram_edit_frame.pack_forget()
+            self.deepgram_saved_frame.pack(side="left")
+        else:
+            self.deepgram_saved_frame.pack_forget()
+            self.deepgram_edit_frame.pack(side="left")
+
+    def _on_deepgram_save(self):
+        key = (self.deepgram_api_entry.get() or "").strip()
+        if not key:
+            return
+        self.app.set_deepgram_api_key(key)
+        try:
+            self.app._write_config_file(self.app._config_payload())
+        except Exception:
+            pass
+        self.deepgram_api_entry.delete(0, "end")
+        self._update_deepgram_saved_state()
+
+    def _on_deepgram_show_edit(self):
+        """Показать поле для ввода ключа заново (ключ в приложении остаётся до нового сохранения)."""
+        self.deepgram_saved_frame.pack_forget()
+        self.deepgram_edit_frame.pack(side="left")
+        self.deepgram_api_entry.delete(0, "end")
+        self.deepgram_api_entry.insert(0, "")  # пусто, чтобы ввести новый или тот же
+
+    def _update_transcribe_check_state(self):
+        self.transcribe_check.configure(state="normal")
+        if getattr(self, "search_entry", None) is not None and not self._transcribe_var.get():
+            self._apply_channel_filter()
+
     def _on_transcribe_toggle(self):
         self.app.set_voice_transcribe_enabled(bool(self._transcribe_var.get()))
+        self._apply_channel_filter()
+
+    def _on_views_toggle(self):
+        self.app.set_views_enabled(bool(self._views_var.get()))
+        self._apply_channel_filter()
+
+    def _on_download_media_toggle(self):
+        self.app.set_download_media_enabled(bool(self._download_media_var.get()))
+
+    def _apply_channel_filter(self):
+        query = self.search_entry.get().strip()
+        self.app.filter_chats(query)
 
     def _on_incremental_toggle(self):
         self.app.set_incremental_enabled(bool(self._incremental_var.get()))
@@ -910,6 +1131,30 @@ class ChatListView(ctk.CTkFrame):
             self.author_filter_label.configure(text="")
         else:
             self.author_filter_label.configure(text=f"Выбрано: {count}")
+
+    def _update_fav_count(self):
+        n = len(self.app.get_favorite_authors_list())
+        if n > 0:
+            self.fav_count_label.configure(text=f"({n})")
+        else:
+            self.fav_count_label.configure(text="")
+
+    def _on_favorites(self):
+        modal = FavoriteAuthorsModal(self.winfo_toplevel(), self.app)
+        self.winfo_toplevel().wait_window(modal)
+        self._update_fav_count()
+        if modal.result_export:
+            all_author_ids = set()
+            chat_ids = []
+            for chat_id, author_ids in modal.result_export:
+                chat_ids.append(chat_id)
+                all_author_ids.update(author_ids)
+            if not chat_ids:
+                return
+            path = filedialog.askdirectory(title="Куда сохранить экспорт избранных?")
+            if not path:
+                return
+            self.app.export_favorites_chats(chat_ids, all_author_ids, path)
 
     def show_folder_progress(self, current, total, label, log_lines=None):
         if not total:
@@ -947,6 +1192,8 @@ class ChatListView(ctk.CTkFrame):
     def show_export_progress(self, chat_name: str, total: Optional[int]):
         self._export_total = total
         self._set_progress_visible(True)
+        if len(chat_name) > 35:
+            chat_name = chat_name[:32].rstrip() + "..."
         self.progress_chat_label.configure(text=chat_name)
         self.cancel_btn.configure(state="normal")
         self.cancel_btn.grid()
@@ -967,6 +1214,10 @@ class ChatListView(ctk.CTkFrame):
         else:
             self.progress_label.configure(text=f"Экспортировано {count} сообщений...")
 
+    def set_export_status(self, text: str):
+        """Показать промежуточный статус экспорта (например, «Загрузка модели…»)."""
+        self.progress_label.configure(text=text if text else "Экспорт...")
+
     def finish_export(self, ok: bool, message: str):
         try:
             self.progress_bar.stop()
@@ -984,12 +1235,10 @@ class ChatListView(ctk.CTkFrame):
         visible = bool(visible)
         if visible:
             if not self.progress_frame.winfo_ismapped():
-                self.progress_frame.pack(anchor="w", padx=20, pady=(0, 12), before=self.list_container)
-            self.cancel_btn.grid()
+                self.progress_frame.pack(fill="x", padx=0, pady=(0, 6), after=self.search_entry)
         else:
             if self.progress_frame.winfo_ismapped():
                 self.progress_frame.pack_forget()
-            self.cancel_btn.grid_remove()
             self.progress_chat_label.configure(text="")
             self.progress_label.configure(text="")
 
@@ -1116,46 +1365,101 @@ class TopicPickerModal(ctk.CTkToplevel):
 
 
 class AuthorFilterModal(ctk.CTkToplevel):
-    def __init__(self, parent, participants: list[dict]):
+    def __init__(self, parent, participants: list[dict], app=None, chat_id: int | None = None, chat_name: str | None = None):
         super().__init__(parent)
         self.title("Фильтр авторов")
-        self.geometry("450x500")
+        self.geometry("500x520")
         self.resizable(False, True)
         self.transient(parent)
         self.grab_set()
 
         self._participants = participants
+        self._app = app
+        self._chat_id = chat_id
+        self._chat_name = chat_name
         self._vars: list[tk.BooleanVar] = []
+        self._fav_labels: list[ctk.CTkLabel] = []
         self.result_ids: set[int] | None = None
+
+        fav_ids = app.get_favorite_author_ids() if app else set()
+
+        if app and chat_id and chat_name and fav_ids:
+            for p in participants:
+                uid = p.get("id")
+                if uid and uid in fav_ids:
+                    app.add_favorite_author(uid, p.get("name", ""), p.get("username", ""), chat_id, chat_name)
 
         ctk.CTkLabel(
             self, text="Фильтр авторов",
             font=(FONT_DISPLAY, 18, "bold"), text_color=COLORS["text"],
         ).pack(padx=20, pady=(16, 4))
         ctk.CTkLabel(
-            self, text="Отметьте авторов, чьи сообщения нужно экспортировать",
+            self, text="Отметьте авторов для экспорта. ★ — добавить в избранные.",
             font=(FONT_TEXT, 12), text_color=COLORS["text_sec"],
         ).pack(padx=20, pady=(0, 12))
 
         btn_row = ctk.CTkFrame(self, fg_color="transparent")
         btn_row.pack(fill="x", padx=20, pady=(0, 8))
-        ModernButton(btn_row, text="Выбрать всех", variant="secondary", width=130, command=self._select_all).pack(side="left")
-        ModernButton(btn_row, text="Снять всех", variant="secondary", width=130, command=self._deselect_all).pack(side="left", padx=(8, 0))
-        ModernButton(btn_row, text="Сбросить фильтр", variant="secondary", width=130, command=self._reset_filter).pack(side="left", padx=(8, 0))
+        ModernButton(btn_row, text="Выбрать всех", variant="secondary", width=120, command=self._select_all).pack(side="left")
+        ModernButton(btn_row, text="Снять всех", variant="secondary", width=120, command=self._deselect_all).pack(side="left", padx=(8, 0))
+        ModernButton(btn_row, text="Сбросить фильтр", variant="secondary", width=120, command=self._reset_filter).pack(side="left", padx=(8, 0))
+
+        self._search_var = tk.StringVar()
+        search_entry = ctk.CTkEntry(self, textvariable=self._search_var, placeholder_text="Поиск по имени или @username...")
+        search_entry.pack(fill="x", padx=20, pady=(0, 8))
+        self._search_var.trace_add("write", lambda *_: self._filter_rows())
 
         scroll_frame = ctk.CTkScrollableFrame(self, fg_color="transparent")
         scroll_frame.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+        self._rows: list[ctk.CTkFrame] = []
+        self._row_keys: list[str] = []
 
         for p in self._participants:
             var = tk.BooleanVar(value=True)
             self._vars.append(var)
             name = p.get("name") or "Без имени"
             username = p.get("username") or ""
-            label = f"{name} (@{username})" if username else name
-            ctk.CTkCheckBox(scroll_frame, text=label, variable=var).pack(anchor="w", pady=2)
+            label_text = f"{name} (@{username})" if username else name
+            uid = p.get("id")
+
+            row = ctk.CTkFrame(scroll_frame, fg_color="transparent")
+            row.pack(fill="x", pady=1)
+            ctk.CTkCheckBox(row, text=label_text, variable=var).pack(side="left", anchor="w")
+
+            is_fav = uid in fav_ids if uid else False
+            star_text = "★" if is_fav else "☆"
+            star_color = ("#F59E0B", "#FBBF24") if is_fav else COLORS["text_sec"]
+            star_lbl = ctk.CTkLabel(
+                row, text=star_text, font=(FONT_TEXT, 16), text_color=star_color,
+                cursor="hand2", width=24,
+            )
+            star_lbl.pack(side="right", padx=(4, 0))
+            star_lbl.bind("<Button-1>", lambda e, u=uid, n=name, un=username, lbl=star_lbl: self._toggle_fav(u, n, un, lbl))
+            self._fav_labels.append(star_lbl)
+            self._rows.append(row)
+            self._row_keys.append(f"{name} {username}".lower())
 
         ModernButton(self, text="Применить", command=self._on_apply).pack(fill="x", padx=20, pady=(0, 16))
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _filter_rows(self):
+        q = self._search_var.get().strip().lower()
+        for i, row in enumerate(self._rows):
+            if not q or q in self._row_keys[i]:
+                row.pack(fill="x", pady=1)
+            else:
+                row.pack_forget()
+
+    def _toggle_fav(self, uid, name, username, lbl):
+        if not self._app or uid is None:
+            return
+        if self._app.is_favorite_author(uid):
+            self._app.remove_favorite_author(uid)
+            lbl.configure(text="☆", text_color=COLORS["text_sec"])
+        else:
+            self._app.add_favorite_author(uid, name, username, self._chat_id, self._chat_name)
+            lbl.configure(text="★", text_color=("#F59E0B", "#FBBF24"))
 
     def _select_all(self):
         for v in self._vars:
@@ -1178,6 +1482,110 @@ class AuthorFilterModal(ctk.CTkToplevel):
                 if pid is not None:
                     ids.add(pid)
         self.result_ids = ids if len(ids) < len(self._participants) else None
+        self.grab_release()
+        self.destroy()
+
+    def _on_close(self):
+        self.grab_release()
+        self.destroy()
+
+
+class FavoriteAuthorsModal(ctk.CTkToplevel):
+    def __init__(self, parent, app):
+        super().__init__(parent)
+        self.title("★ Избранные авторы")
+        self.geometry("520x560")
+        self.resizable(False, True)
+        self.transient(parent)
+        self.grab_set()
+
+        self._app = app
+        self.result_export: list[tuple[int, set[int]]] | None = None
+        self._chat_vars: dict[int, dict[int, tk.BooleanVar]] = {}
+
+        favorites = app.get_favorite_authors_list()
+
+        ctk.CTkLabel(
+            self, text="★ Избранные авторы",
+            font=(FONT_DISPLAY, 18, "bold"), text_color=COLORS["text"],
+        ).pack(padx=20, pady=(16, 4))
+
+        if not favorites:
+            ctk.CTkLabel(
+                self, text="Список пуст.\nДобавляйте авторов через «Фильтр авторов» → ☆",
+                font=(FONT_TEXT, 13), text_color=COLORS["text_sec"], justify="center",
+            ).pack(padx=20, pady=40)
+        else:
+            ctk.CTkLabel(
+                self, text=f"Авторов: {len(favorites)}. Раскройте автора — выберите чаты для экспорта.",
+                font=(FONT_TEXT, 12), text_color=COLORS["text_sec"],
+            ).pack(padx=20, pady=(0, 10))
+
+            self._scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
+            self._scroll.pack(fill="both", expand=True, padx=14, pady=(0, 10))
+
+            for fav in favorites:
+                uid = fav["id"]
+                name = fav.get("name") or "Без имени"
+                username = fav.get("username") or ""
+                chats: dict[int, str] = fav.get("chats", {})
+                self._chat_vars[uid] = {}
+
+                author_frame = ctk.CTkFrame(self._scroll, fg_color=COLORS["card"], corner_radius=8)
+                author_frame.pack(fill="x", pady=4, padx=2)
+
+                header = ctk.CTkFrame(author_frame, fg_color="transparent")
+                header.pack(fill="x", padx=10, pady=(8, 0))
+
+                title_text = f"★ {name}" + (f"  @{username}" if username else "")
+                title_lbl = ctk.CTkLabel(header, text=title_text, font=(FONT_TEXT, 14, "bold"), text_color=COLORS["text"], anchor="w")
+                title_lbl.pack(side="left", fill="x", expand=True)
+
+                remove_lbl = ctk.CTkLabel(header, text="✕", font=(FONT_TEXT, 14), text_color=COLORS["error"], cursor="hand2", width=20)
+                remove_lbl.pack(side="right")
+                remove_lbl.bind("<Button-1>", lambda e, u=uid, f=author_frame: self._remove_fav(u, f))
+
+                chats_frame = ctk.CTkFrame(author_frame, fg_color="transparent")
+                chats_frame.pack(fill="x", padx=20, pady=(4, 8))
+
+                if chats:
+                    for chat_id, chat_name in chats.items():
+                        var = tk.BooleanVar(value=True)
+                        self._chat_vars[uid][chat_id] = var
+                        ctk.CTkCheckBox(
+                            chats_frame, text=chat_name, variable=var,
+                            font=(FONT_TEXT, 12),
+                        ).pack(anchor="w", pady=1)
+                else:
+                    ctk.CTkLabel(
+                        chats_frame, text="Нет привязанных чатов",
+                        font=(FONT_TEXT, 11), text_color=COLORS["text_sec"],
+                    ).pack(anchor="w")
+
+        btn_frame = ctk.CTkFrame(self, fg_color="transparent")
+        btn_frame.pack(fill="x", padx=20, pady=(8, 16))
+
+        ModernButton(
+            btn_frame, text="Экспорт выбранных чатов",
+            command=self._on_export,
+        ).pack(fill="x")
+
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+    def _remove_fav(self, uid: int, frame: ctk.CTkFrame):
+        self._app.remove_favorite_author(uid)
+        self._chat_vars.pop(uid, None)
+        frame.destroy()
+
+    def _on_export(self):
+        chat_to_authors: dict[int, set[int]] = {}
+        for uid, chats in self._chat_vars.items():
+            for chat_id, var in chats.items():
+                if var.get():
+                    chat_to_authors.setdefault(chat_id, set()).add(uid)
+        if not chat_to_authors:
+            return
+        self.result_export = [(cid, aids) for cid, aids in chat_to_authors.items()]
         self.grab_release()
         self.destroy()
 
@@ -1212,13 +1620,21 @@ class App(ctk.CTk):
         self.popular_min_reactions = 5
         self.analytics_enabled = False
         self.voice_transcribe_enabled = False
+        self.transcription_provider: str = "local"  # "local" | "deepgram"
+        self.deepgram_api_key: str = ""
+        self.views_enabled = False
+        self.download_media_enabled = False
         self.date_period_days = 0
         self.custom_date_from = None
         self.custom_date_to = None
         self.incremental_enabled = False
         self.author_filter_ids: set[int] | None = None
         self._export_history_path = os.path.expanduser("~/.tg_exporter/export_history.json")
-        self._whisper_model = None
+        self.local_whisper_model: str = "base"
+        self.transcription_language: str = "multi"
+        self._whisper_model_cache = None
+        self._parakeet_model_cache = None
+        self._silero_model_cache = None  # dict: lang -> (model, decoder, utils)
         self._folder_active = False
         self._folder_queue = []
         self._folder_total = 0
@@ -1378,6 +1794,14 @@ class App(ctk.CTk):
         payload = {}
         if self.api_creds.get("api_id"):
             payload["api_id"] = self.api_creds["api_id"]
+        if self.local_whisper_model:
+            payload["local_whisper_model"] = self.local_whisper_model
+        if self.transcription_language:
+            payload["transcription_language"] = self.transcription_language
+        if self.transcription_provider:
+            payload["transcription_provider"] = self.transcription_provider
+        if self.deepgram_api_key:
+            payload["deepgram_api_key"] = self.deepgram_api_key
         return payload
 
     def _secure_config_permissions(self) -> None:
@@ -1429,6 +1853,11 @@ class App(ctk.CTk):
                 session_str = self._load_session_from_keyring()
                 if session_str:
                     self.api_creds["session"] = session_str
+
+            self.local_whisper_model = self.api_creds.get("local_whisper_model", "base") or "base"
+            self.transcription_language = self.api_creds.get("transcription_language", "multi") or "multi"
+            self.transcription_provider = self.api_creds.get("transcription_provider", "local") or "local"
+            self.deepgram_api_key = self.api_creds.get("deepgram_api_key", "") or ""
         except:
             pass
 
@@ -1638,12 +2067,16 @@ class App(ctk.CTk):
 
     def filter_chats(self, query):
         dialogs = self._get_folder_dialogs(self.current_folder)
-        if not query:
-            self.chats_view.render_chats(dialogs)
-            return
-        q = query.lower()
-        res = [d for d in dialogs if q in (d.name or "").lower()]
-        self.chats_view.render_chats(res)
+
+        channels_only = self.voice_transcribe_enabled or self.views_enabled
+        if channels_only:
+            dialogs = [d for d in dialogs if self._is_broadcast_channel(d)]
+
+        if query:
+            q = query.lower()
+            dialogs = [d for d in dialogs if q in (d.name or "").lower()]
+
+        self.chats_view.render_chats(dialogs)
 
     def set_current_folder(self, folder_name):
         self.current_folder = folder_name or "Все чаты"
@@ -1663,6 +2096,29 @@ class App(ctk.CTk):
     def set_voice_transcribe_enabled(self, value: bool):
         self.voice_transcribe_enabled = bool(value)
 
+    def set_local_whisper_model(self, model: str):
+        self.local_whisper_model = (model or "base").strip() or "base"
+        self._whisper_model_cache = None
+        self._write_config_file(self._config_payload())
+
+    def set_transcription_language(self, lang: str):
+        self.transcription_language = (lang or "multi").strip() or "multi"
+
+    def set_transcription_provider(self, provider: str):
+        self.transcription_provider = (provider or "local").strip().lower() or "local"
+        if self.transcription_provider not in ("local", "deepgram"):
+            self.transcription_provider = "local"
+
+    def set_deepgram_api_key(self, key: str):
+        self.deepgram_api_key = (key or "").strip()
+        self._write_config_file(self._config_payload())
+
+    def set_views_enabled(self, value: bool):
+        self.views_enabled = bool(value)
+
+    def set_download_media_enabled(self, value: bool):
+        self.download_media_enabled = bool(value)
+
     def set_date_period(self, days: int):
         self.date_period_days = max(0, int(days))
 
@@ -1672,6 +2128,102 @@ class App(ctk.CTk):
 
     def set_incremental_enabled(self, value: bool):
         self.incremental_enabled = bool(value)
+
+    # --- Favorite authors ---
+
+    _FAV_AUTHORS_PATH = os.path.expanduser("~/.tg_exporter/favorite_authors.json")
+
+    def _load_favorite_authors(self) -> dict[str, dict]:
+        try:
+            if os.path.exists(self._FAV_AUTHORS_PATH):
+                with open(self._FAV_AUTHORS_PATH, "r") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _save_favorite_authors(self, data: dict[str, dict]):
+        try:
+            os.makedirs(os.path.dirname(self._FAV_AUTHORS_PATH), exist_ok=True)
+            with open(self._FAV_AUTHORS_PATH, "w") as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+        except Exception:
+            pass
+
+    def add_favorite_author(self, uid: int, name: str, username: str, chat_id: int | None = None, chat_name: str | None = None):
+        data = self._load_favorite_authors()
+        key = str(uid)
+        entry = data.get(key, {"name": name, "username": username, "chats": {}})
+        entry["name"] = name
+        entry["username"] = username
+        if "chats" not in entry:
+            entry["chats"] = {}
+        if chat_id is not None and chat_name:
+            entry["chats"][str(chat_id)] = chat_name
+        data[key] = entry
+        self._save_favorite_authors(data)
+
+    def remove_favorite_author(self, uid: int):
+        data = self._load_favorite_authors()
+        data.pop(str(uid), None)
+        self._save_favorite_authors(data)
+
+    def is_favorite_author(self, uid: int) -> bool:
+        return str(uid) in self._load_favorite_authors()
+
+    def get_favorite_author_ids(self) -> set[int]:
+        return {int(k) for k in self._load_favorite_authors().keys()}
+
+    def get_favorite_authors_list(self) -> list[dict]:
+        data = self._load_favorite_authors()
+        result = []
+        for uid_str, info in data.items():
+            chats = info.get("chats", {})
+            result.append({
+                "id": int(uid_str),
+                "name": info.get("name", ""),
+                "username": info.get("username", ""),
+                "chats": {int(k): v for k, v in chats.items()},
+            })
+        result.sort(key=lambda x: (x.get("name") or "").lower())
+        return result
+
+    def _find_dialog_by_peer_id(self, peer_id: int):
+        for d in self.all_dialogs:
+            try:
+                if get_peer_id(d.entity) == peer_id:
+                    return d
+            except Exception:
+                continue
+        return None
+
+    def export_favorites_chats(self, chat_peer_ids: list[int], author_ids: set[int], path: str):
+        dialogs = []
+        for pid in chat_peer_ids:
+            d = self._find_dialog_by_peer_id(pid)
+            if d:
+                dialogs.append(d)
+        if not dialogs:
+            self.queue.put(("info", "Не найдено чатов для экспорта"))
+            return
+        self.author_filter_ids = author_ids
+        self.incremental_enabled = True
+        folder_name = "favorites_export"
+        self._folder_queue = dialogs
+        self._folder_total = len(dialogs)
+        self._folder_index = 0
+        self._folder_export_base = os.path.join(path, sanitize_filename(folder_name))
+        try:
+            os.makedirs(self._folder_export_base, exist_ok=True)
+        except Exception as e:
+            self.queue.put(("error", str(e)))
+            return
+        self._cancel_export.clear()
+        self._folder_active = True
+        self._folder_log = []
+        self._folder_current_label = ""
+        self.queue.put(("folder_progress", (0, self._folder_total, "Избранные авторы")))
+        self._export_next_in_folder()
 
     def _load_export_history(self) -> dict:
         try:
@@ -1712,6 +2264,14 @@ class App(ctk.CTk):
     def _load_participants_task(self, dialog):
         try:
             c = self._get_client()
+            if not c.is_connected():
+                c.connect()
+            chat_id = None
+            chat_name = dialog.name or "Чат"
+            try:
+                chat_id = get_peer_id(dialog.entity)
+            except Exception:
+                pass
             participants = []
             seen = set()
             for user in c.iter_participants(dialog, limit=500):
@@ -1723,9 +2283,9 @@ class App(ctk.CTk):
                 username = getattr(user, "username", None) or ""
                 participants.append({"id": uid, "name": name, "username": username})
             participants.sort(key=lambda x: (x.get("name") or "").lower())
-            self.queue.put(("participants_loaded", participants))
+            self.queue.put(("participants_loaded", (participants, chat_id, chat_name)))
         except Exception as e:
-            self.queue.put(("participants_loaded", []))
+            self.queue.put(("participants_loaded", ([], None, None)))
             self.queue.put(("info", f"Не удалось загрузить участников: {e}"))
 
     def _cleanup_temp_voice_files(self):
@@ -1767,6 +2327,8 @@ class App(ctk.CTk):
     def _load_topics_task(self, dialog):
         try:
             c = self._get_client()
+            if not c.is_connected():
+                c.connect()
             entity = getattr(dialog, "input_entity", None) or getattr(dialog, "entity", None) or dialog
             result = c(functions.messages.GetForumTopicsRequest(
                 peer=entity,
@@ -1787,61 +2349,255 @@ class App(ctk.CTk):
             self.queue.put(("topics_loaded", (dialog, [])))
             self.queue.put(("info", f"Не удалось загрузить темы: {e}"))
 
-    def _ensure_ffmpeg(self) -> bool:
+    def _get_transcriber(self) -> str | None:
+        """Возвращает 'local', 'deepgram' или None в зависимости от настроек транскрипции."""
+        if not self.voice_transcribe_enabled:
+            return None
+        if (self.transcription_provider or "local") == "deepgram" and (self.deepgram_api_key or "").strip():
+            return "deepgram"
+        return "local"
+
+    _TRANSCRIBE_MAX_DURATION_SEC = 15 * 60  # только голос и видеокружки до 15 мин; длинные и обычные видео не транскрибируем
+
+    def _get_ffmpeg_path(self) -> str | None:
         try:
             import imageio_ffmpeg
-            ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe()
-            ffmpeg_dir = os.path.dirname(ffmpeg_path)
-            current_path = os.environ.get("PATH", "")
-            if ffmpeg_dir not in current_path:
-                os.environ["PATH"] = ffmpeg_dir + os.pathsep + current_path
-            return True
+            return imageio_ffmpeg.get_ffmpeg_exe()
         except Exception:
-            return False
+            pass
+        import shutil
+        return shutil.which("ffmpeg")
 
-    def _get_transcriber(self):
-        if self._whisper_model is not None:
-            return self._whisper_model
+    def _extract_audio_to_wav(self, video_path: str) -> str | None:
+        ffmpeg = self._get_ffmpeg_path()
+        if not ffmpeg:
+            return None
         try:
-            from faster_whisper import WhisperModel
+            fd, wav_path = tempfile.mkstemp(suffix=".wav", prefix="tg_exporter_audio_")
+            os.close(fd)
+            subprocess.run(
+                [
+                    ffmpeg, "-y", "-i", video_path,
+                    "-vn", "-acodec", "pcm_s16le", "-ar", "16000", "-ac", "1",
+                    wav_path,
+                ],
+                capture_output=True,
+                timeout=600,
+                check=True,
+            )
+            return wav_path
         except Exception:
             return None
-        if not self._ensure_ffmpeg():
-            return None
-        model_root = os.path.expanduser("~/.tg_exporter/models")
-        os.makedirs(model_root, exist_ok=True)
-        self._whisper_model = WhisperModel(
-            "tiny",
-            device="cpu",
-            compute_type="int8",
-            download_root=model_root,
-        )
-        return self._whisper_model
 
-    def _transcribe_voice(self, msg, transcriber) -> str | None:
-        voice = getattr(msg, "voice", None)
-        video_note = getattr(msg, "video_note", None)
-        if not voice and not video_note:
+    def _get_whisper_model(self):
+        """Ленивая загрузка faster-whisper модели (кэш на время экспорта). Не используется для Parakeet/Silero."""
+        mid = self.local_whisper_model or ""
+        if mid.startswith("parakeet") or mid.startswith("silero"):
             return None
-        suffix = ".ogg" if voice else ".mp4"
+        if self._whisper_model_cache is not None:
+            return self._whisper_model_cache
+        try:
+            try:
+                self.queue.put(("export_status", "Загрузка модели транскрипции..."))
+                time.sleep(0.25)
+            except Exception:
+                pass
+            from faster_whisper import WhisperModel
+        except ImportError:
+            self._last_transcribe_error = "Установите: pip install faster-whisper"
+            return None
+        model_size = self.local_whisper_model or "base"
+        try:
+            device = "cuda"
+            compute_type = "float16"
+            try:
+                import torch
+                if not torch.cuda.is_available():
+                    device = "cpu"
+                    compute_type = "int8"
+            except Exception:
+                device = "cpu"
+                compute_type = "int8"
+            self._whisper_model_cache = WhisperModel(model_size, device=device, compute_type=compute_type)
+            return self._whisper_model_cache
+        except Exception as e:
+            self._last_transcribe_error = str(e)[:200]
+            return None
+
+    def _get_silero_model(self):
+        """Ленивая загрузка Silero STT (PyTorch Hub). Язык из id: silero-ru -> ru, silero-en -> en."""
+        mid = (self.local_whisper_model or "").strip()
+        if not mid.startswith("silero-"):
+            return None
+        lang = mid.replace("silero-", "").strip() or "en"
+        if self._silero_model_cache is None:
+            self._silero_model_cache = {}
+        if lang in self._silero_model_cache:
+            return self._silero_model_cache[lang]
+        try:
+            try:
+                self.queue.put(("export_status", "Загрузка модели транскрипции..."))
+                time.sleep(0.25)
+            except Exception:
+                pass
+            import torch
+        except ImportError:
+            self._last_transcribe_error = "Для Silero установите: pip install torch torchaudio"
+            return None
+        try:
+            device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            model, decoder, utils = torch.hub.load(
+                repo_or_dir="snakers4/silero-models",
+                model="silero_stt",
+                language=lang,
+                device=device,
+                trust_repo=True,
+            )
+            (read_batch, split_into_batches, read_audio, prepare_model_input) = utils
+            self._silero_model_cache[lang] = (model, decoder, read_batch, split_into_batches, prepare_model_input, device)
+            return self._silero_model_cache[lang]
+        except Exception as e:
+            self._last_transcribe_error = str(e)[:200]
+            return None
+
+    def _get_parakeet_model(self):
+        """Ленивая загрузка NVIDIA Parakeet (NeMo). Модель в основном для английского."""
+        if self._parakeet_model_cache is not None:
+            return self._parakeet_model_cache
+        try:
+            try:
+                self.queue.put(("export_status", "Загрузка модели транскрипции..."))
+                time.sleep(0.25)
+            except Exception:
+                pass
+            import nemo.collections.asr as nemo_asr
+        except ImportError:
+            self._last_transcribe_error = "Для Parakeet установите: pip install nemo_toolkit[asr]"
+            return None
+        model_id = self.local_whisper_model or "parakeet-tdt-0.6b"
+        name = "nvidia/parakeet-tdt-1.1b" if "1.1" in model_id else "nvidia/parakeet-tdt-0.6b"
+        try:
+            self._parakeet_model_cache = nemo_asr.models.ASRModel.from_pretrained(name)
+            return self._parakeet_model_cache
+        except Exception as e:
+            self._last_transcribe_error = str(e)[:200]
+            return None
+
+    def _preload_transcription_model(self):
+        """Предзагрузка модели транскрипции с показом статуса в UI, чтобы не «зависать» на первом голосовом сообщении."""
+        if self._cancel_export.is_set():
+            return
+        try:
+            self.queue.put(("export_status", "Загрузка модели транскрипции..."))
+            time.sleep(0.3)
+            mid = (self.local_whisper_model or "").strip().lower()
+            if mid.startswith("silero"):
+                self._get_silero_model()
+            elif mid.startswith("parakeet"):
+                self._get_parakeet_model()
+            else:
+                self._get_whisper_model()
+        except Exception:
+            pass
+        finally:
+            try:
+                self.queue.put(("export_status", ""))
+            except Exception:
+                pass
+
+    def _transcribe_audio_deepgram(self, audio_data: bytes, content_type: str) -> str | None:
+        """Облачная транскрипция через Deepgram API. Требует API ключ."""
+        if not audio_data or not (self.deepgram_api_key or "").strip():
+            return None
+        key = (self.deepgram_api_key or "").strip()
+        ct = (content_type or "audio/ogg").split(";")[0].strip()
+        if "wav" not in ct.lower():
+            ct = "audio/ogg"
+        else:
+            ct = "audio/wav"
+        url = "https://api.deepgram.com/v1/listen?model=nova-2&smart_format=true"
+        lang = (self.transcription_language or "multi").strip() or "multi"
+        if lang != "multi":
+            url += "&language=" + urllib.parse.quote(lang)
+        req = urllib.request.Request(
+            url,
+            data=audio_data,
+            method="POST",
+            headers={
+                "Authorization": "Token " + key,
+                "Content-Type": ct,
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                data = json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            self._last_transcribe_error = f"Deepgram HTTP {e.code}"
+            return None
+        except Exception as e:
+            self._last_transcribe_error = str(e)[:200]
+            return None
+        try:
+            channels = data.get("results", {}).get("channels", [])
+            if not channels:
+                return None
+            alts = channels[0].get("alternatives", [])
+            if not alts:
+                return None
+            text = (alts[0].get("transcript") or "").strip()
+            return text or None
+        except Exception:
+            return None
+
+    def _transcribe_audio_local(self, audio_data: bytes, content_type: str) -> str | None:
+        """Локальная транскрипция: Whisper, Parakeet (NeMo) или Silero. Пишет аудио во временный файл."""
+        if not audio_data:
+            return None
+        mid = self.local_whisper_model or ""
+        use_parakeet = mid.startswith("parakeet")
+        use_silero = mid.startswith("silero")
+        ext = ".wav" if "wav" in (content_type or "") else ".ogg"
         tmp_path = None
         try:
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix, prefix="tg_exporter_voice_") as tmp:
-                tmp_path = tmp.name
-            msg.download_media(file=tmp_path)
-            segments, _info = transcriber.transcribe(
-                tmp_path,
-                language=None,
-                beam_size=1,
-                vad_filter=True,
-            )
-            parts = []
-            for seg in segments:
-                text = (seg.text or "").strip()
-                if text:
-                    parts.append(text)
+            fd, tmp_path = tempfile.mkstemp(suffix=ext, prefix="tg_exporter_transcribe_")
+            os.close(fd)
+            with open(tmp_path, "wb") as f:
+                f.write(audio_data)
+            if use_parakeet:
+                model = self._get_parakeet_model()
+                if model is None:
+                    return None
+                result = model.transcribe([tmp_path])
+                if result and len(result) and hasattr(result[0], "text"):
+                    return (result[0].text or "").strip() or None
+                return None
+            if use_silero:
+                silero = self._get_silero_model()
+                if silero is None:
+                    return None
+                model, decoder, read_batch, split_into_batches, prepare_model_input, device = silero
+                try:
+                    batches = split_into_batches([tmp_path], batch_size=1)
+                    inp = prepare_model_input(read_batch(batches[0]), device=device)
+                    out = model(inp)
+                    parts = []
+                    for i in range(out.shape[0]):
+                        text = decoder(out[i].cpu())
+                        if text:
+                            parts.append(text)
+                    return " ".join(parts).strip() or None
+                except Exception as e:
+                    self._last_transcribe_error = str(e)[:200]
+                    return None
+            model = self._get_whisper_model()
+            if model is None:
+                return None
+            lang = (self.transcription_language or "multi").strip() or "multi"
+            segments, _ = model.transcribe(tmp_path, language=None if lang == "multi" else lang, beam_size=1)
+            parts = [s.text for s in segments if s.text]
             return " ".join(parts).strip() or None
-        except Exception:
+        except Exception as e:
+            self._last_transcribe_error = str(e)[:200]
             return None
         finally:
             if tmp_path and os.path.exists(tmp_path):
@@ -1849,6 +2605,70 @@ class App(ctk.CTk):
                     os.remove(tmp_path)
                 except Exception:
                     pass
+
+    def _prepare_audio_for_transcribe(self, msg):
+        """Скачивает и подготавливает аудио (только в потоке с event loop — экспорт).
+        Возвращает (bytes, content_type, media_audio_bytes_or_none) или None.
+        media_audio_bytes_or_none: для видеокружков — те же байты (сохранить в media/audio вместо полного видео)."""
+        if getattr(self, "_cancel_export", None) and self._cancel_export.is_set():
+            return None
+        voice = getattr(msg, "voice", None)
+        video_note = getattr(msg, "video_note", None)
+        if not voice and not video_note:
+            return None
+        duration_sec = getattr(voice or video_note, "duration", 0) or 0
+        if duration_sec > self._TRANSCRIBE_MAX_DURATION_SEC:
+            self._last_transcribe_error = f"длинное сообщение ({duration_sec // 60} мин), лимит {self._TRANSCRIBE_MAX_DURATION_SEC // 60} мин"
+            return None
+        tmp_path = None
+        wav_path = None
+        self._last_transcribe_error = None
+        try:
+            if voice:
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".ogg", prefix="tg_exporter_voice_") as tmp:
+                    tmp_path = tmp.name
+                msg.download_media(file=tmp_path)
+                with open(tmp_path, "rb") as f:
+                    return (f.read(), "audio/ogg", None)
+            if not self._get_ffmpeg_path():
+                self._last_transcribe_error = "для видеокружков нужен ffmpeg"
+                return None
+            if getattr(self, "_cancel_export", None) and self._cancel_export.is_set():
+                return None
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4", prefix="tg_exporter_video_") as tmp:
+                tmp_path = tmp.name
+            msg.download_media(file=tmp_path)
+            if getattr(self, "_cancel_export", None) and self._cancel_export.is_set():
+                return None
+            wav_path = self._extract_audio_to_wav(tmp_path)
+            if not wav_path:
+                self._last_transcribe_error = "не удалось извлечь звук из видеокружка"
+                return None
+            with open(wav_path, "rb") as f:
+                data = f.read()
+            return (data, "audio/wav", data)
+        except Exception as e:
+            self._last_transcribe_error = str(e)[:150]
+            return None
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            if wav_path and os.path.exists(wav_path):
+                try:
+                    os.remove(wav_path)
+                except Exception:
+                    pass
+
+    def _transcribe_voice(self, msg, transcriber) -> str | None:
+        """Только голосовые и видеокружки до 15 мин. Локальная транскрипция (faster-whisper)."""
+        prepared = self._prepare_audio_for_transcribe(msg)
+        if prepared is None:
+            return None
+        audio_data, content_type = prepared[0], prepared[1]
+        return self._transcribe_audio_local(audio_data, content_type)
 
     def _is_popular_candidate(self, dialog) -> bool:
         entity = getattr(dialog, "entity", None)
@@ -2030,6 +2850,8 @@ class App(ctk.CTk):
             if self._cancel_export.is_set():
                 raise ExportCancelled()
             c = self._get_client()
+            if not c.is_connected():
+                c.connect()
             timestamp = datetime.datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
             chat_title = sanitize_filename(dialog.name or "chat")
             if len(chat_title) > 60:
@@ -2072,6 +2894,19 @@ class App(ctk.CTk):
             is_forum = bool(getattr(getattr(dialog, "entity", None), "forum", False))
             analytics_enabled = self.analytics_enabled and self._is_group_chat(dialog)
             transcribe_enabled = self.voice_transcribe_enabled and self._is_broadcast_channel(dialog)
+            views_enabled = self.views_enabled
+            download_media_enabled = self.download_media_enabled
+            media_base = os.path.join(export_dir, "media") if download_media_enabled else None
+            media_dirs = {}  # subdir path by type: "photo", "video", "audio", "documents"
+            if media_base:
+                try:
+                    for sub in ("photo", "video", "audio", "documents"):
+                        d = os.path.join(media_base, sub)
+                        os.makedirs(d, exist_ok=True)
+                        media_dirs[sub] = d
+                except Exception:
+                    media_base = None
+                    media_dirs = {}
             author_counts: dict[int, int] = {}
             author_messages: dict[int, list[str]] = {}
             author_meta: dict[int, dict[str, str]] = {}
@@ -2079,7 +2914,7 @@ class App(ctk.CTk):
             transcriber = None
             transcribe_failed = False
             transcribe_warned = False
-            
+            video_note_audio_saved_ids = set()
 
             def _date_key(value: str | None) -> str | None:
                 if not value:
@@ -2158,6 +2993,8 @@ class App(ctk.CTk):
             if topic_title:
                 export_label = f"{export_label} → {topic_title}"
             self.queue.put(("export_start", (export_label, total)))
+            if transcribe_enabled and (self.transcription_provider or "local") == "local":
+                self._preload_transcription_model()
 
             iter_kwargs: dict = {"reverse": True}
             if topic_id is not None:
@@ -2188,13 +3025,16 @@ class App(ctk.CTk):
                         sender_id = getattr(msg, "sender_id", None)
                         if sender_id is not None and sender_id not in author_filter:
                             count += 1
-                            if total and count % 200 == 0:
+                            if total and (count <= 1 or count % 20 == 0):
                                 self.queue.put(("export_progress", (count, total)))
                             continue
                     is_out = bool(getattr(msg, "out", False))
                     if not first: f.write(",\n")
                     first = False
                     msg_data = message_to_export(msg)
+                    if not views_enabled:
+                        msg_data.pop("views", None)
+                        msg_data.pop("forwards", None)
                     json.dump(msg_data, f, ensure_ascii=False)
 
                     if msg_data.get("type") != "message":
@@ -2207,9 +3047,9 @@ class App(ctk.CTk):
                                 if isinstance(msg_data.get("id"), int):
                                     service_topic_by_id[msg_data["id"]] = msg_data.get("topic_title") or ""
                         count += 1
-                        if total and count % 100 == 0:
+                        if total and (count <= 1 or count % 20 == 0):
                             self.queue.put(("export_progress", (count, total)))
-                        elif not total and count % 200 == 0:
+                        elif not total and (count <= 1 or count % 50 == 0):
                             self.queue.put(("export_progress", (count, None)))
                         continue
 
@@ -2227,24 +3067,104 @@ class App(ctk.CTk):
                             has_topics = True
                         topic_comment = _build_topic_comment(topic_id, topic_map) if has_topics else ""
                     formatted = _format_markdown_message(msg_data)
+                    if self._cancel_export.is_set():
+                        raise ExportCancelled()
                     if transcribe_enabled and not transcribe_failed:
-                        if getattr(msg, "voice", None):
+                        if getattr(msg, "voice", None) or getattr(msg, "video_note", None):
                             if transcriber is None:
                                 transcriber = self._get_transcriber()
                                 if transcriber is None:
                                     transcribe_failed = True
                             if transcriber is not None:
-                                text = self._transcribe_voice(msg, transcriber)
+                                try:
+                                    self.queue.put(("export_progress", (count + 1, total)))
+                                except Exception:
+                                    pass
+                                try:
+                                    try:
+                                        self.queue.put(("export_status", "Скачивание голосового сообщения..."))
+                                    except Exception:
+                                        pass
+                                    prepared = self._prepare_audio_for_transcribe(msg)
+                                finally:
+                                    try:
+                                        self.queue.put(("export_status", ""))
+                                    except Exception:
+                                        pass
+                                if prepared is not None:
+                                    audio_data, content_type = prepared[0], prepared[1]
+                                    media_audio = prepared[2] if len(prepared) >= 3 else None
+                                    if media_audio and media_dirs and msg_id:
+                                        try:
+                                            out_path = os.path.join(media_dirs.get("audio", ""), f"vn_{msg_id}.wav")
+                                            if os.path.isdir(os.path.dirname(out_path)):
+                                                with open(out_path, "wb") as af:
+                                                    af.write(media_audio)
+                                                video_note_audio_saved_ids.add(msg_id)
+                                        except Exception:
+                                            pass
+                                    if self._cancel_export.is_set():
+                                        raise ExportCancelled()
+                                    try:
+                                        try:
+                                            self.queue.put(("export_status", "Транскрипция..."))
+                                        except Exception:
+                                            pass
+                                        if transcriber == "deepgram":
+                                            text = self._transcribe_audio_deepgram(audio_data, content_type)
+                                        else:
+                                            text = self._transcribe_audio_local(audio_data, content_type)
+                                    except Exception:
+                                        text = None
+                                        if not getattr(self, "_last_transcribe_error", None):
+                                            self._last_transcribe_error = "ошибка транскрипции"
+                                    finally:
+                                        try:
+                                            self.queue.put(("export_status", ""))
+                                        except Exception:
+                                            pass
+                                else:
+                                    text = None
+                                    if self._cancel_export.is_set():
+                                        raise ExportCancelled()
                                 if text:
                                     formatted = f"{formatted}\n\nТранскрипция: {text}"
                                 else:
-                                    if not transcribe_warned:
-                                        transcribe_warned = True
-                                        self.queue.put(("info", "Не удалось распознать часть голосовых сообщений. Экспорт продолжен без транскрипции."))
+                                    reason = getattr(self, "_last_transcribe_error", None) or ""
+                                    if reason and "длинное сообщение" in reason:
+                                        formatted = f"{formatted}\n\n[Транскрипция пропущена: {reason}]"
+                                    else:
+                                        if not transcribe_warned:
+                                            transcribe_warned = True
+                                            self.queue.put(("info", f"Не удалось распознать часть голосовых и видео. Причина: {reason or 'нет текста в ответе'}. Экспорт продолжен без транскрипции."))
                             elif not transcribe_warned:
                                 transcribe_warned = True
-                                self.queue.put(("info", "Транскрибация недоступна (нужны зависимости). Экспорт продолжен без нее."))
+                                self.queue.put(("info", "Транскрипция недоступна (для видео нужен ffmpeg, для локальной — faster-whisper). Экспорт продолжен без неё."))
                     rendered = f"{topic_comment}{formatted}" if topic_comment else formatted
+                    if self._cancel_export.is_set():
+                        raise ExportCancelled()
+                    if media_dirs and not getattr(msg, "sticker", None):
+                        target_dir = None
+                        if getattr(msg, "photo", None):
+                            target_dir = media_dirs.get("photo")
+                        elif getattr(msg, "video", None):
+                            target_dir = media_dirs.get("video")
+                        elif getattr(msg, "video_note", None):
+                            if msg_id not in video_note_audio_saved_ids:
+                                target_dir = media_dirs.get("video")
+                        elif getattr(msg, "voice", None) or getattr(msg, "audio", None):
+                            target_dir = media_dirs.get("audio")
+                        elif getattr(msg, "document", None):
+                            target_dir = media_dirs.get("documents")
+                        if target_dir:
+                            if self._cancel_export.is_set():
+                                raise ExportCancelled()
+                            try:
+                                msg.download_media(file=target_dir)
+                            except Exception:
+                                pass
+                            if self._cancel_export.is_set():
+                                raise ExportCancelled()
                     if analytics_enabled:
                         author_id = msg_data.get("from_id")
                         if not is_out and isinstance(author_id, int) and author_id > 0:
@@ -2287,9 +3207,9 @@ class App(ctk.CTk):
                                 popular_entries.append((rendered, total_reactions))
 
                     count += 1
-                    if total and count % 100 == 0:
+                    if total and (count <= 1 or count % 20 == 0):
                         self.queue.put(("export_progress", (count, total)))
-                    elif not total and count % 200 == 0:
+                    elif not total and (count <= 1 or count % 50 == 0):
                         self.queue.put(("export_progress", (count, None)))
                 f.write('\n  ]\n}\n')
 
@@ -2470,6 +3390,10 @@ class App(ctk.CTk):
                     "Выберите другую папку или разрешите приложение в Windows Security."
                 )
             self.queue.put(("export_error", msg))
+        finally:
+            self._whisper_model_cache = None
+            self._parakeet_model_cache = None
+            self._silero_model_cache = None
 
     # --- UI Updates ---
 
@@ -2500,6 +3424,8 @@ class App(ctk.CTk):
                 elif kind == "export_progress":
                     count, total = data
                     self.chats_view.update_export_progress(count, total)
+                elif kind == "export_status":
+                    self.chats_view.set_export_status(data or "")
                 elif kind == "export_done":
                     self._cancel_export.clear()
                     self.chats_view.finish_export(True, data)
@@ -2535,10 +3461,12 @@ class App(ctk.CTk):
                         self._start_export(dialog)
                 elif kind == "participants_loaded":
                     self.chats_view.status_lbl.configure(text="")
-                    if data:
-                        modal = AuthorFilterModal(self, data)
+                    participants, chat_id, chat_name = data if isinstance(data, tuple) else (data, None, None)
+                    if participants:
+                        modal = AuthorFilterModal(self, participants, app=self, chat_id=chat_id, chat_name=chat_name)
                         self.wait_window(modal)
                         self.author_filter_ids = modal.result_ids
+                        self.chats_view._update_fav_count()
                         if modal.result_ids is not None:
                             self.chats_view.update_author_filter_label(len(modal.result_ids))
                         else:

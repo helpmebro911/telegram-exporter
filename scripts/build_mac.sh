@@ -4,8 +4,9 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
-python3 -m venv .venv
-source .venv/bin/activate
+VENV_DIR="${VENV_DIR:-.venv}"
+python3 -m venv "$VENV_DIR"
+source "$VENV_DIR/bin/activate"
 
 pip install -r requirements.txt
 pip install pyinstaller

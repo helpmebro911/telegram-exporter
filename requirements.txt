@@ -1,5 +1,6 @@
 telethon
 customtkinter
-faster-whisper
-imageio-ffmpeg
 keyring
+imageio-ffmpeg
+PySocks
+faster-whisper
