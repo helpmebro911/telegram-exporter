@@ -35,6 +35,7 @@ jobs:
         with:
           name: ${{ matrix.artifact }}
           path: dist/${{ matrix.dmg }}
+          retention-days: 1
 
   build-windows:
     runs-on: windows-latest
@@ -54,6 +55,7 @@ jobs:
         with:
           name: telegramexporter-windows
           path: dist/TelegramExporterSetup.exe
+          retention-days: 1
 
   release:
     runs-on: ubuntu-latest
