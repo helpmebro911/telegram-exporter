@@ -11,31 +11,23 @@ permissions:
 
 jobs:
   build-macos:
-    strategy:
-      matrix:
-        include:
-          - os: macos-13
-            dmg: TelegramExporter-mac-intel.dmg
-          - os: macos-14
-            dmg: TelegramExporter-mac-arm64.dmg
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: Build DMG
+      - name: Build Universal2 DMG
         env:
-          DMG_NAME: ${{ matrix.dmg }}
-        run: chmod +x ./scripts/build_mac.sh && ./scripts/build_mac.sh
-      - name: Publish to Downloads Repo
+          DMG_NAME: TelegramExporter-mac-universal.dmg
+        run: |
+          chmod +x ./scripts/build_mac.sh
+          VENV_DIR=.venv_universal ./scripts/build_mac.sh
+      - name: Publish to Releases
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.DOWNLOADS_TOKEN }}
-          repository: morf3uzzz/telegram-exporter-downloads
-          target_commitish: main
-          files: dist/${{ matrix.dmg }}
+          files: dist/TelegramExporter-mac-universal.dmg
 
   build-windows:
     runs-on: windows-latest
@@ -50,11 +42,8 @@ jobs:
         run: choco install innosetup -y
       - name: Build installer
         run: iscc .\installer\TelegramExporter.iss
-      - name: Publish to Downloads Repo
+      - name: Publish to Releases
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          token: ${{ secrets.DOWNLOADS_TOKEN }}
-          repository: morf3uzzz/telegram-exporter-downloads
-          target_commitish: main
           files: dist/TelegramExporterSetup.exe
