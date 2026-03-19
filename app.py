@@ -590,6 +590,7 @@ class ChatListView(ctk.CTkFrame):
         self._popular_min_var = tk.StringVar(value="5")
         self._analytics_var = tk.BooleanVar(value=False)
         self._transcribe_var = tk.BooleanVar(value=False)
+        self._include_private_var = tk.BooleanVar(value=bool(getattr(self.app, "include_private_chats", False)))
         self._views_var = tk.BooleanVar(value=False)
         self._incremental_var = tk.BooleanVar(value=False)
         self._period_options = ["Все время", "Неделя", "Месяц", "3 месяца", "Год", "Свой период"]
@@ -714,11 +715,18 @@ class ChatListView(ctk.CTkFrame):
         self.transcribe_bar.pack(fill="x", padx=20, pady=(0, 4))
         self.transcribe_check = ctk.CTkCheckBox(
             self.transcribe_bar,
-            text="Транскрипция голосовых и видео (каналы)",
+            text="Транскрипция голосовых и видео",
             variable=self._transcribe_var,
             command=self._on_transcribe_toggle,
         )
         self.transcribe_check.pack(side="left")
+        self.include_private_check = ctk.CTkCheckBox(
+            self.transcribe_bar,
+            text="Личные чаты",
+            variable=self._include_private_var,
+            command=self._on_include_private_toggle,
+        )
+        self.include_private_check.pack(side="left", padx=(20, 0))
 
         # Провайдер: Локальная | Deepgram
         self.transcribe_provider_bar = ctk.CTkFrame(self, fg_color="transparent")
@@ -1102,6 +1110,10 @@ class ChatListView(ctk.CTkFrame):
 
     def _on_transcribe_toggle(self):
         self.app.set_voice_transcribe_enabled(bool(self._transcribe_var.get()))
+        self._apply_channel_filter()
+
+    def _on_include_private_toggle(self):
+        self.app.set_include_private_chats(bool(self._include_private_var.get()))
         self._apply_channel_filter()
 
     def _on_views_toggle(self):
@@ -1628,6 +1640,7 @@ class App(ctk.CTk):
         self.custom_date_from = None
         self.custom_date_to = None
         self.incremental_enabled = False
+        self.include_private_chats = False
         self.author_filter_ids: set[int] | None = None
         self._export_history_path = os.path.expanduser("~/.tg_exporter/export_history.json")
         self.local_whisper_model: str = "base"
@@ -1802,6 +1815,8 @@ class App(ctk.CTk):
             payload["transcription_provider"] = self.transcription_provider
         if self.deepgram_api_key:
             payload["deepgram_api_key"] = self.deepgram_api_key
+        if self.include_private_chats:
+            payload["include_private_chats"] = True
         return payload
 
     def _secure_config_permissions(self) -> None:
@@ -1858,6 +1873,12 @@ class App(ctk.CTk):
             self.transcription_language = self.api_creds.get("transcription_language", "multi") or "multi"
             self.transcription_provider = self.api_creds.get("transcription_provider", "local") or "local"
             self.deepgram_api_key = self.api_creds.get("deepgram_api_key", "") or ""
+            self.include_private_chats = bool(self.api_creds.get("include_private_chats", False))
+            try:
+                if getattr(self, "chats_view", None) is not None and getattr(self.chats_view, "_include_private_var", None) is not None:
+                    self.chats_view._include_private_var.set(bool(self.include_private_chats))
+            except Exception:
+                pass
             if self.api_creds.get("api_id"):
                 raw = str(self.api_creds["api_id"])
                 digits = "".join(c for c in raw if c.isdigit())
@@ -2080,7 +2101,7 @@ class App(ctk.CTk):
     def filter_chats(self, query):
         dialogs = self._get_folder_dialogs(self.current_folder)
 
-        channels_only = self.voice_transcribe_enabled or self.views_enabled
+        channels_only = self.views_enabled or (self.voice_transcribe_enabled and not self.include_private_chats)
         if channels_only:
             dialogs = [d for d in dialogs if self._is_broadcast_channel(d)]
 
@@ -2107,6 +2128,10 @@ class App(ctk.CTk):
 
     def set_voice_transcribe_enabled(self, value: bool):
         self.voice_transcribe_enabled = bool(value)
+
+    def set_include_private_chats(self, value: bool):
+        self.include_private_chats = bool(value)
+        self._write_config_file(self._config_payload())
 
     def set_local_whisper_model(self, model: str):
         self.local_whisper_model = (model or "base").strip() or "base"
@@ -2331,6 +2356,16 @@ class App(ctk.CTk):
         if entity is None:
             return False
         return bool(getattr(entity, "broadcast", False))
+
+    def _is_private_chat(self, dialog) -> bool:
+        entity = getattr(dialog, "entity", None)
+        if entity is None:
+            return False
+        if entity.__class__.__name__ != "User":
+            return False
+        if bool(getattr(entity, "bot", False)):
+            return False
+        return True
 
     def _is_forum(self, dialog) -> bool:
         entity = getattr(dialog, "entity", None)
@@ -2686,7 +2721,7 @@ class App(ctk.CTk):
         entity = getattr(dialog, "entity", None)
         if entity is None:
             return False
-        if entity.__class__.__name__ == "User":
+        if entity.__class__.__name__ == "User" and not self.include_private_chats:
             return False
         return True
 
@@ -2905,7 +2940,9 @@ class App(ctk.CTk):
             has_topics = False
             is_forum = bool(getattr(getattr(dialog, "entity", None), "forum", False))
             analytics_enabled = self.analytics_enabled and self._is_group_chat(dialog)
-            transcribe_enabled = self.voice_transcribe_enabled and self._is_broadcast_channel(dialog)
+            transcribe_enabled = self.voice_transcribe_enabled and (
+                self._is_broadcast_channel(dialog) or (self.include_private_chats and self._is_private_chat(dialog))
+            )
             views_enabled = self.views_enabled
             download_media_enabled = self.download_media_enabled
             media_base = os.path.join(export_dir, "media") if download_media_enabled else None
