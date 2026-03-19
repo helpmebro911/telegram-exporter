@@ -1,9 +1,30 @@
-# 🚀 Telegram Exporter
+<div align="center">
+  <img src="https://raw.githubusercontent.com/morf3uzzz/telegram-exporter/main/assets/app_icon.png" width="128" alt="Telegram Exporter Logo">
+  
+  <h1>Telegram Exporter</h1>
+  
+  <p><b>Мощный и удобный инструмент для экспорта сообщений из Telegram каналов и чатов в форматы JSON и Markdown.</b><br>
+  Приложение поддерживает локальную транскрипцию голосовых сообщений, скачивание медиафайлов и продвинутую фильтрацию.</p>
+  
+  <p>
+    <a href="https://t.me/+cK5SwFPffNViOWUy">
+      <img src="https://img.shields.io/badge/TELEGRAM-%D0%9A%D0%90%D0%9D%D0%90%D0%9B_%D0%90%D0%92%D0%A2%D0%9E%D0%A0%D0%90-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white&labelColor=555555" alt="Telegram Канал Автора">
+    </a>
+    <a href="https://www.youtube.com/channel/UCLk7uewdd5s7kszfy736ScA">
+      <img src="https://img.shields.io/badge/YOUTUBE-%D0%9A%D0%90%D0%9D%D0%90%D0%9B_%D0%90%D0%92%D0%A2%D0%9E%D0%A0%D0%90-FF0000?style=for-the-badge&logo=youtube&logoColor=white&labelColor=555555" alt="YouTube Канал Автора">
+    </a>
+  </p>
 
-[![GitHub Release](https://img.shields.io/github/v/release/morf3uzzz/telegram-exporter)](https://github.com/morf3uzzz/telegram-exporter/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+  <p>
+    <a href="https://github.com/morf3uzzz/telegram-exporter/releases">
+      <img src="https://img.shields.io/github/v/release/morf3uzzz/telegram-exporter?style=flat-square" alt="GitHub Release">
+    </a>
+    <a href="https://opensource.org/licenses/MIT">
+      <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="License: MIT">
+    </a>
+  </p>
+</div>
 
-**Telegram Exporter** — это мощный и удобный инструмент для экспорта сообщений из Telegram каналов и чатов в форматы JSON и Markdown. Приложение поддерживает локальную транскрипцию голосовых сообщений, скачивание медиафайлов и продвинутую фильтрацию.
 
 ## ✨ Основные возможности
 
