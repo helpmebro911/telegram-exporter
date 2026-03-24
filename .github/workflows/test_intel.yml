@@ -1,0 +1,9 @@
+name: Test Intel Runner
+on: workflow_dispatch
+jobs:
+  test-intel:
+    runs-on: macos-13
+    steps:
+      - run: echo "Intel Runner is alive!"
+      - run: uname -a
+      - run: python3 --version
