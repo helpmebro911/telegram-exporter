@@ -8,6 +8,17 @@ VENV_DIR="${VENV_DIR:-.venv}"
 python3 -m venv "$VENV_DIR"
 source "$VENV_DIR/bin/activate"
 
+# Архитектура сборки. Если переменная не задана — берём архитектуру хоста,
+# чтобы не пытаться собрать x86_64-бинарь на Apple Silicon раннере.
+if [ -z "${TARGET_ARCH:-}" ]; then
+  HOST_ARCH="$(uname -m)"
+  case "$HOST_ARCH" in
+    arm64|aarch64) export TARGET_ARCH="arm64" ;;
+    *)             export TARGET_ARCH="x86_64" ;;
+  esac
+fi
+echo "Building for TARGET_ARCH=$TARGET_ARCH"
+
 pip install -r requirements.txt
 pip install pyinstaller
 
@@ -36,14 +47,21 @@ if [ -f "$ICON_PNG" ]; then
 fi
 
 eval "pyinstaller --windowed --name \"Telegram Exporter\" $ICON_ARG \
+  --target-arch \"$TARGET_ARCH\" \
   --exclude-module app_legacy \
+  --exclude-module app \
   --collect-all customtkinter \
   --collect-all telethon \
   --collect-all faster_whisper \
   --collect-all ctranslate2 \
   --collect-all tokenizers \
   --collect-all imageio_ffmpeg \
-  app.py"
+  --collect-all tg_exporter \
+  --hidden-import tg_exporter.ui.app \
+  --hidden-import tg_exporter.core.orchestrator \
+  --hidden-import tg_exporter.services.transcription.factory \
+  --hidden-import keyring.backends \
+  main.py"
 
 APP_PATH="dist/Telegram Exporter.app"
 DMG_NAME="${DMG_NAME:-TelegramExporter.dmg}"

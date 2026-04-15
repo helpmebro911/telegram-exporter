@@ -1,20 +1,25 @@
+# Python
 .venv/
+.venv_intel/
+venv/
 __pycache__/
 *.pyc
+*.pyo
 .DS_Store
 
 # Build artifacts
 build/
 dist/
-*.spec
+tmp_artifacts/
 
-# Local sessions/config
+# Local sessions (runtime, в домашней директории)
 telegram_session.session
 telegram_session.session-journal
 *.session
 *.session-journal
-~/.tg_exporter/
 
-# Generated icons
-icons/
-tmp_artifacts/
+# IDE / agent configs (локальные, не нужны в репо)
+.claude/
+.cursor/
+.idea/
+.vscode/
