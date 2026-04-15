@@ -42,4 +42,4 @@ pyinstaller --windowed --onefile --name "TelegramExporter" $iconArg `
     --hidden-import keyring.backends `
     main.py
 
-Write-Host "EXE готов: dist\TelegramExporter.exe"
+Write-Host "EXE ready: dist\TelegramExporter.exe"

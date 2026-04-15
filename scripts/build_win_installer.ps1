@@ -56,7 +56,7 @@ $exeSize = (Get-Item $exePath).Length
 Write-Host "EXE size: $([math]::Round($exeSize / 1MB, 1)) MB"
 # Sanity check: broken bundles without customtkinter/faster-whisper come out ~15 MB.
 # A healthy bundle is 60+ MB. Fail the build if we're below the threshold.
-if ($exeSize -lt 40MB) { throw "EXE too small ($exeSize bytes) — likely missing dependencies" }
+if ($exeSize -lt (40 * 1MB)) { throw "EXE too small ($exeSize bytes) - likely missing dependencies" }
 
 Write-Host "EXE ready: $exePath"
 Write-Host "Open installer\\TelegramExporter.iss in Inno Setup to compile installer."
