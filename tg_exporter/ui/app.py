@@ -125,8 +125,15 @@ class App(ctk.CTk):
     def show_login(self) -> None:
         self._switch_view(self.login_view)
         self.login_view.refresh_state()
-        if self.has_api_creds() and self.credentials.load_session(self.config.api_id):
+        if self.has_api_creds() and self._has_any_session():
             self._worker.submit(self._bg_check_session)
+
+    def _has_any_session(self) -> bool:
+        """Есть ли хоть одна сохранённая сессия — активный профиль или дефолтная."""
+        active = self._profiles.active()
+        if active and self._profiles.load_session(active):
+            return True
+        return bool(self.credentials.load_session(self.config.api_id))
 
     def show_chats(self) -> None:
         self._switch_view(self.chats_view)
@@ -392,6 +399,17 @@ class App(ctk.CTk):
     # ---- Background tasks ----
 
     def _bg_check_session(self) -> None:
+        # Если есть активный профиль — грузим его сессию в клиент до проверки,
+        # иначе клиент построится с дефолтной (пустой для мульти-аккаунтных сетапов).
+        active = self._profiles.active()
+        if active:
+            session_str = self._profiles.load_session(active)
+            if session_str:
+                if active.api_id and active.api_id != self.config.api_id:
+                    self.config = self.config.with_api_id(active.api_id)
+                    self.config.save()
+                    self._client_mgr.update_config(self.config)
+                self._client_mgr.use_session(session_str)
         result = self._auth.check_session()
         if result.step == AuthStep.SUCCESS:
             self._worker.put_event("login_success", None)
